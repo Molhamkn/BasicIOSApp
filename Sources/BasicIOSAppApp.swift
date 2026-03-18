@@ -23,7 +23,8 @@ struct CameraContainerView: View {
             
             IronManHUD(
                 currentZoom: cameraManager.zoom,
-                showCameraSwitcher: $showCameraSwitcher
+                showCameraSwitcher: $showCameraSwitcher,
+                cameraManager: cameraManager
             )
         }
         .onAppear {
@@ -76,8 +77,8 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     func setZoom(_ newZoom: CGFloat) {
-        guard let input = currentInput,
-              let device = input.device else { return }
+        guard let input = currentInput else { return }
+        let device = input.device
         
         let maxZoom = min(device.activeFormat.videoMaxZoomFactor, 10.0)
         let minZoom: CGFloat = 1.0
@@ -125,6 +126,7 @@ class CameraPreviewUIView: UIView {
 struct IronManHUD: View {
     let currentZoom: CGFloat
     @Binding var showCameraSwitcher: Bool
+    let cameraManager: CameraManager
     
     var body: some View {
         VStack {
@@ -143,11 +145,9 @@ struct IronManHUD: View {
             Spacer()
             
             HStack {
-                CameraSwitchButton {
-                    showCameraSwitcher.toggle()
-                }
-                .padding(.leading, 20)
-                .padding(.bottom, 20)
+                CameraSwitchButton(cameraManager: cameraManager, showCameraSwitcher: $showCameraSwitcher)
+                    .padding(.leading, 20)
+                    .padding(.bottom, 20)
                 
                 Spacer()
                 
@@ -177,7 +177,7 @@ struct TimeDisplay: View {
     
     private var formattedTime: String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
+        formatter.dateFormat = "h:mm:ss a"
         return formatter.string(from: currentTime)
     }
 }
@@ -194,10 +194,14 @@ struct ZoomIndicator: View {
 }
 
 struct CameraSwitchButton: View {
-    let action: () -> Void
+    let cameraManager: CameraManager
+    let showCameraSwitcher: Binding<Bool>
     
     var body: some View {
-        Button(action: action) {
+        Button(action: {
+            cameraManager.switchCamera()
+            showCameraSwitcher.wrappedValue = false
+        }) {
             Image(systemName: "camera.rotate")
                 .font(.system(size: 24))
                 .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
