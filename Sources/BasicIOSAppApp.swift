@@ -110,6 +110,23 @@ struct CameraPreviewViewRepresentable: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {
         DispatchQueue.main.async {
             uiView.layer.sublayers?.first?.frame = uiView.bounds
+            if let previewLayer = uiView.layer.sublayers?.first as? AVCaptureVideoPreviewLayer,
+               let connection = previewLayer.connection {
+                let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+                let orientation = windowScene?.interfaceOrientation ?? .portrait
+                switch orientation {
+                case .portrait:
+                    connection.videoOrientation = .portrait
+                case .portraitUpsideDown:
+                    connection.videoOrientation = .portraitUpsideDown
+                case .landscapeLeft:
+                    connection.videoOrientation = .landscapeLeft
+                case .landscapeRight:
+                    connection.videoOrientation = .landscapeRight
+                default:
+                    connection.videoOrientation = .portrait
+                }
+            }
         }
     }
 }
