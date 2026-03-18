@@ -1,159 +1,162 @@
 import SwiftUI
 import AVFoundation
 
-struct CameraView: UIViewRepresentable {
-    @Binding var currentZoom: CGFloat
+struct CameraContainerView: View {
+    @StateObject private var cameraManager = CameraManager()
+    @State private var showCameraSwitcher = false
+    @GestureState private var gestureZoom: CGFloat = 1.0
     
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
-        view.backgroundColor = .black
+    var body: some View {
+        ZStack {
+            CameraPreviewViewRepresentable(cameraManager: cameraManager)
+                .ignoresSafeArea()
+                .gesture(
+                    MagnificationGesture()
+                        .updating($gestureZoom) { value, state, _ in
+                            state = value
+                        }
+                        .onEnded { value in
+                            let newZoom = cameraManager.zoom * value
+                            cameraManager.setZoom(newZoom)
+                        }
+                )
+            
+            IronManHUD(
+                currentZoom: cameraManager.zoom,
+                showCameraSwitcher: $showCameraSwitcher
+            )
+        }
+        .onAppear {
+            cameraManager.setup()
+        }
+    }
+}
+
+class CameraManager: NSObject, ObservableObject {
+    @Published var zoom: CGFloat = 1.0
+    @Published var isFrontCamera: Bool = false
+    @Published var isReady: Bool = false
+    
+    let captureSession = AVCaptureSession()
+    var currentInput: AVCaptureDeviceInput?
+    
+    func setup() {
+        setupCamera(position: .back)
+    }
+    
+    func setupCamera(position: AVCaptureDevice.Position) {
+        captureSession.beginConfiguration()
+        captureSession.inputs.forEach { captureSession.removeInput($0) }
         
-        let captureSession = AVCaptureSession()
-        captureSession.sessionPreset = .photo
-        
-        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
               let input = try? AVCaptureDeviceInput(device: camera) else {
-            return view
+            captureSession.commitConfiguration()
+            return
         }
         
         if captureSession.canAddInput(input) {
             captureSession.addInput(input)
+            currentInput = input
         }
         
-        let previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
+        captureSession.commitConfiguration()
+        isFrontCamera = (position == .front)
+        isReady = true
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            if self?.captureSession.isRunning == false {
+                self?.captureSession.startRunning()
+            }
+        }
+    }
+    
+    func switchCamera() {
+        let newPosition: AVCaptureDevice.Position = isFrontCamera ? .back : .front
+        setupCamera(position: newPosition)
+    }
+    
+    func setZoom(_ newZoom: CGFloat) {
+        guard let input = currentInput,
+              let device = input.device else { return }
+        
+        let maxZoom = min(device.activeFormat.videoMaxZoomFactor, 10.0)
+        let minZoom: CGFloat = 1.0
+        zoom = max(minZoom, min(newZoom, maxZoom))
+        
+        do {
+            try device.lockForConfiguration()
+            device.videoZoomFactor = zoom
+            device.unlockForConfiguration()
+        } catch {}
+    }
+}
+
+struct CameraPreviewViewRepresentable: UIViewRepresentable {
+    @ObservedObject var cameraManager: CameraManager
+    
+    func makeUIView(context: Context) -> CameraPreviewUIView {
+        let view = CameraPreviewUIView()
+        view.backgroundColor = .black
+        
+        let previewLayer = AVCaptureVideoPreviewLayer(session: cameraManager.captureSession)
         previewLayer.videoGravity = .resizeAspectFill
         previewLayer.connection?.videoOrientation = .landscapeRight
-        view.layer.addSublayer(previewLayer)
-        
-        context.coordinator.previewLayer = previewLayer
-        context.coordinator.captureSession = captureSession
-        context.coordinator.camera = camera
-        context.coordinator.isFrontCamera = false
-        
-        let pinchGesture = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
-        pinchGesture.delegate = context.coordinator
-        view.addGestureRecognizer(pinchGesture)
-        
-        DispatchQueue.global(qos: .userInitiated).async {
-            captureSession.startRunning()
-        }
+        view.previewLayer = previewLayer
+        view.cameraManager = cameraManager
         
         return view
     }
     
-    func updateUIView(_ uiView: UIView, context: Context) {
-        DispatchQueue.main.async {
-            uiView.layer.sublayers?.first?.frame = uiView.bounds
-        }
-    }
-    
-    func makeCoordinator() -> Coordinator {
-        Coordinator(currentZoom: $currentZoom)
-    }
-    
-    class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        var captureSession: AVCaptureSession?
-        var previewLayer: AVCaptureVideoPreviewLayer?
-        var camera: AVCaptureDevice?
-        var isFrontCamera: Bool = false
-        var currentZoom: Binding<CGFloat>
-        
-        init(currentZoom: Binding<CGFloat>) {
-            self.currentZoom = currentZoom
-        }
-        
-        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
-            guard let camera = camera else { return }
-            
-            do {
-                try camera.lockForConfiguration()
-                let maxZoom = min(camera.activeFormat.videoMaxZoomFactor, 10.0)
-                let minZoom: CGFloat = 1.0
-                let savedZoom = currentZoom.wrappedValue
-                
-                if gesture.state == .began {
-                } else if gesture.state == .changed {
-                    let newZoom = savedZoom * gesture.scale
-                    camera.videoZoomFactor = max(minZoom, min(newZoom, maxZoom))
-                }
-                
-                camera.unlockForConfiguration()
-            } catch {}
-        }
-        
-        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            return true
-        }
-        
-        deinit {
-            captureSession?.stopRunning()
-        }
+    func updateUIView(_ uiView: CameraPreviewUIView, context: Context) {
+        uiView.previewLayer?.frame = uiView.bounds
     }
 }
 
-@main
-struct BasicIOSAppApp: App {
-    @State private var currentZoom: CGFloat = 1.0
-    @State private var showCameraSwitcher = false
+class CameraPreviewUIView: UIView {
+    var previewLayer: AVCaptureVideoPreviewLayer?
+    weak var cameraManager: CameraManager?
     
-    var body: some Scene {
-        WindowGroup {
-            ZStack {
-                CameraView(currentZoom: $currentZoom)
-                    .ignoresSafeArea()
-                
-                IronManHUD(currentZoom: $currentZoom, showCameraSwitcher: $showCameraSwitcher)
-                
-                if showCameraSwitcher {
-                    CameraSwitchOverlay(isFront: false)
-                        .onTapGesture {
-                            showCameraSwitcher = false
-                        }
-                }
-            }
-        }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        previewLayer?.frame = bounds
     }
 }
 
 struct IronManHUD: View {
-    @Binding var currentZoom: CGFloat
+    let currentZoom: CGFloat
     @Binding var showCameraSwitcher: Bool
-    @State private var currentTime = Date()
-    
-    let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                VStack {
-                    HStack {
-                        TimeDisplay()
-                            .padding(.leading, 20)
-                            .padding(.top, 20)
-                        
-                        Spacer()
-                        
-                        ZoomIndicator(zoom: currentZoom)
-                            .padding(.trailing, 20)
-                            .padding(.top, 20)
-                    }
-                    
-                    Spacer()
-                    
-                    HStack {
-                        CameraSwitchButton {
-                            showCameraSwitcher.toggle()
-                        }
-                        .padding(.leading, 20)
+        VStack {
+            HStack {
+                TimeDisplay()
+                    .padding(.leading, 20)
+                    .padding(.top, 20)
+                
+                Spacer()
+                
+                ZoomIndicator(zoom: currentZoom)
+                    .padding(.trailing, 20)
+                    .padding(.top, 20)
+            }
+            
+            Spacer()
+            
+            HStack {
+                CameraSwitchButton {
+                    showCameraSwitcher.toggle()
+                }
+                .padding(.leading, 20)
+                .padding(.bottom, 20)
+                
+                Spacer()
+                
+                if showCameraSwitcher {
+                    CameraSwitchMenu(isFront: false)
+                        .padding(.trailing, 20)
                         .padding(.bottom, 20)
-                        
-                        Spacer()
-                    }
                 }
             }
-        }
-        .onReceive(timer) { time in
-            currentTime = time
         }
     }
 }
@@ -163,13 +166,16 @@ struct TimeDisplay: View {
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     
     var body: some View {
-        Text(timeString)
+        Text(formattedTime)
             .font(.system(size: 24, weight: .light, design: .monospaced))
             .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
             .shadow(color: Color(red: 0.0, green: 0.5, blue: 1.0), radius: 5)
+            .onReceive(timer) { _ in
+                currentTime = Date()
+            }
     }
     
-    private var timeString: String {
+    private var formattedTime: String {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         return formatter.string(from: currentTime)
@@ -201,26 +207,23 @@ struct CameraSwitchButton: View {
     }
 }
 
-struct CameraSwitchOverlay: View {
+struct CameraSwitchMenu: View {
     let isFront: Bool
     
     var body: some View {
-        VStack {
-            Spacer()
-            
-            HStack {
-                Spacer()
-                
-                Text("SWITCHING NOT IMPLEMENTED YET")
-                    .font(.system(size: 14, weight: .bold, design: .monospaced))
-                    .foregroundColor(.red)
-                    .padding()
-                
-                Spacer()
-            }
-            
-            Spacer()
+        Text("Camera switch placeholder")
+            .font(.system(size: 14, weight: .bold, design: .monospaced))
+            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+            .padding()
+            .background(Color.black.opacity(0.5))
+    }
+}
+
+@main
+struct BasicIOSAppApp: App {
+    var body: some Scene {
+        WindowGroup {
+            CameraContainerView()
         }
-        .background(Color.black.opacity(0.5))
     }
 }
