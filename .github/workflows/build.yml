@@ -1,0 +1,27 @@
+name: Build iOS App
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup XcodeGen
+      run: |
+        brew install xcodegen
+    
+    - name: Generate Xcode Project
+      run: |
+        cd BasicIOSApp
+        xcodegen generate
+    
+    - name: Build
+      run: |
+        cd BasicIOSApp
+        xcodebuild -project BasicIOSApp.xcodeproj -scheme BasicIOSApp -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 16' build
