@@ -44,7 +44,6 @@ struct CameraContainerView: View {
 struct FaceTarget: Identifiable {
     let id = UUID()
     var rect: CGRect
-    var velocity: CGPoint = .zero
 }
 
 class CameraManager: NSObject, ObservableObject {
@@ -58,13 +57,17 @@ class CameraManager: NSObject, ObservableObject {
     var onFacesDetected: (([FaceTarget]) -> Void)?
     
     private let sequenceHandler = VNSequenceRequestHandler()
-    private var trackedFaces: [Int: TrackedFace] = [:]
+    private var trackedFaces: [Int: SmoothedFace] = [:]
     private var nextFaceID: Int = 0
+    private var lastUpdateTime: Date = Date()
     
-    struct TrackedFace {
+    struct SmoothedFace {
         var id: Int
-        var smoothedRect: CGRect
-        var lastUpdate: Date
+        var rawRect: CGRect
+        var displayRect: CGRect
+        var velocityX: CGFloat = 0
+        var velocityY: CGFloat = 0
+        var lastSeen: Date
     }
     
     func setup() {
@@ -153,7 +156,7 @@ class CameraManager: NSObject, ObservableObject {
             guard let results = request.results as? [VNFaceObservation] else { return }
             
             let rawRects = results.map { $0.boundingBox }
-            let smoothedRects = self?.smoothAndTrackFaces(rawRects) ?? rawRects
+            let smoothedRects = self?.updateTracking(rawRects) ?? rawRects
             
             let faceTargets = smoothedRects.map { FaceTarget(rect: $0) }
             self?.onFacesDetected?(faceTargets)
@@ -162,21 +165,23 @@ class CameraManager: NSObject, ObservableObject {
         try? sequenceHandler.perform([request], on: pixelBuffer)
     }
     
-    private func smoothAndTrackFaces(_ newRects: [CGRect]) -> [CGRect] {
-        var smoothed: [CGRect] = []
+    private func updateTracking(_ newRects: [CGRect]) -> [CGRect] {
         let now = Date()
+        let dt = now.timeIntervalSince(lastUpdateTime)
+        lastUpdateTime = now
         
         var matchedFaces: Set<Int> = []
+        var results: [CGRect] = []
         
         for newRect in newRects {
-            var bestMatch: TrackedFace?
+            var bestMatch: SmoothedFace?
             var bestDistance: CGFloat = .greatestFiniteMagnitude
             
             for (id, tracked) in trackedFaces {
                 if matchedFaces.contains(id) { continue }
                 
-                let dx = newRect.midX - tracked.smoothedRect.midX
-                let dy = newRect.midY - tracked.smoothedRect.midY
+                let dx = newRect.midX - tracked.rawRect.midX
+                let dy = newRect.midY - tracked.rawRect.midY
                 let distance = sqrt(dx * dx + dy * dy)
                 
                 if distance < bestDistance {
@@ -185,29 +190,66 @@ class CameraManager: NSObject, ObservableObject {
                 }
             }
             
-            if let match = bestMatch, bestDistance < 0.15 {
-                let alpha: CGFloat = 0.3
+            if let match = bestMatch, bestDistance < 0.2 {
+                let distance = sqrt(pow(newRect.midX - match.displayRect.midX, 2) + pow(newRect.midY - match.displayRect.midY, 2))
+                
+                var alpha: CGFloat = 0.4
+                if distance > 0.05 {
+                    alpha = 0.6
+                }
+                if distance > 0.1 {
+                    alpha = 0.8
+                }
+                
+                let smoothX = match.displayRect.midX * (1 - alpha) + newRect.midX * alpha
+                let smoothY = match.displayRect.midY * (1 - alpha) + newRect.midY * alpha
+                
+                let vx = (newRect.midX - match.rawRect.midX) / CGFloat(max(dt, 0.016))
+                let vy = (newRect.midY - match.rawRect.midY) / CGFloat(max(dt, 0.016))
+                
+                let smoothW = match.displayRect.width * (1 - alpha * 0.5) + newRect.width * alpha * 0.5
+                let smoothH = match.displayRect.height * (1 - alpha * 0.5) + newRect.height * alpha * 0.5
+                
                 let smoothedRect = CGRect(
-                    x: match.smoothedRect.minX * (1 - alpha) + newRect.minX * alpha,
-                    y: match.smoothedRect.minY * (1 - alpha) + newRect.minY * alpha,
-                    width: match.smoothedRect.width * (1 - alpha) + newRect.width * alpha,
-                    height: match.smoothedRect.height * (1 - alpha) + newRect.height * alpha
+                    x: smoothX - smoothW / 2,
+                    y: smoothY - smoothH / 2,
+                    width: smoothW,
+                    height: smoothH
                 )
-                trackedFaces[match.id] = TrackedFace(id: match.id, smoothedRect: smoothedRect, lastUpdate: now)
+                
+                trackedFaces[match.id] = SmoothedFace(
+                    id: match.id,
+                    rawRect: newRect,
+                    displayRect: smoothedRect,
+                    velocityX: vx,
+                    velocityY: vy,
+                    lastSeen: now
+                )
                 matchedFaces.insert(match.id)
-                smoothed.append(smoothedRect)
+                results.append(smoothedRect)
             } else {
                 let newID = nextFaceID
                 nextFaceID += 1
-                trackedFaces[newID] = TrackedFace(id: newID, smoothedRect: newRect, lastUpdate: now)
+                trackedFaces[newID] = SmoothedFace(
+                    id: newID,
+                    rawRect: newRect,
+                    displayRect: newRect,
+                    velocityX: 0,
+                    velocityY: 0,
+                    lastSeen: now
+                )
                 matchedFaces.insert(newID)
-                smoothed.append(newRect)
+                results.append(newRect)
             }
         }
         
-        trackedFaces = trackedFaces.filter { matchedFaces.contains($0.key) }
+        for (id, _) in trackedFaces {
+            if !matchedFaces.contains(id) {
+                trackedFaces.removeValue(forKey: id)
+            }
+        }
         
-        return smoothed
+        return results
     }
 }
 
