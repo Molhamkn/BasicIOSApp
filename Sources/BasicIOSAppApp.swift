@@ -2,8 +2,8 @@ import SwiftUI
 import AVFoundation
 
 struct CameraView: UIViewRepresentable {
-    func makeUIView(context: Context) -> CameraPreviewView {
-        let view = CameraPreviewView()
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
         view.backgroundColor = .black
         
         let captureSession = AVCaptureSession()
