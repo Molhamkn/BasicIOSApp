@@ -198,7 +198,8 @@ class CameraManager: NSObject, ObservableObject {
         var faceTargets = rects.map { FaceTarget(rect: $0) }
         
         for i in faceTargets.indices {
-            if let classifier = faceClassifier, let name = classifier.recognize(faceRect: rects[i], in: pixelBuffer) {
+            if let classifier = faceClassifier,
+               let name = classifier.recognize(faceRect: rects[i], in: pixelBuffer) {
                 faceTargets[i].recognizedName = name
             }
         }
@@ -215,70 +216,57 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 }
 
 class FaceClassifier {
-    private var trainingData: [(features: [Float], label: String)] = []
+    struct TrainingSample {
+        var hash: Int
+        var label: String
+    }
+    
+    private var trainingSamples: [TrainingSample] = []
     private var isTrained = false
     
-    func addTrainingSample(features: [Float], label: String) {
-        trainingData.append((features: features, label: label))
+    func addTrainingSample(imageHash: Int, label: String) {
+        trainingSamples.append(TrainingSample(hash: imageHash, label: label))
         isTrained = false
     }
     
     func train() {
-        guard trainingData.count >= 3 else { return }
+        guard trainingSamples.count >= 3 else { return }
         isTrained = true
     }
     
-    func recognize(faceRect: CGRect, in pixelBuffer: CVPixelBuffer) -> String? {
-        guard isTrained else { return nil }
+    func recognize(imageHash: Int) -> String? {
+        guard isTrained, !trainingSamples.isEmpty else { return nil }
         
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = CIContext()
+        var bestMatch: (label: String, distance: Int) = (label: "", distance: Int.max)
         
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
-        
-        let request = VNGenerateImageFeaturePrintRequest()
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        
-        try? handler.perform([request])
-        
-        guard let result = request.results?.first as? VNFeaturePrintObservation else { return nil }
-        
-        var features: [Float] = []
-        for i in 0..<128 {
-            var value: Float = 0
-            try? result.featurePrint(at: i, value: &value)
-            features.append(value)
-        }
-        
-        var bestMatch: (label: String, distance: Float) = (label: "", distance: .greatestFiniteMagnitude)
-        
-        for sample in trainingData {
-            var distance: Float = 0
-            for i in 0..<min(features.count, sample.features.count) {
-                distance += abs(features[i] - sample.features[i])
-            }
+        for sample in trainingSamples {
+            let distance = abs(imageHash - sample.hash)
             if distance < bestMatch.distance {
                 bestMatch = (label: sample.label, distance: distance)
             }
         }
         
-        if bestMatch.distance < 50 {
+        if bestMatch.distance < 50000000 {
             return bestMatch.label
         }
         return nil
     }
     
+    func getTrainedNames() -> [String] {
+        return Array(Set(trainingSamples.map { $0.label })).sorted()
+    }
+    
     func save() {
-        let data = trainingData.map { ["features": $0.features, "label": $0.label] }
+        let data = trainingSamples.map { ["hash": $0.hash, "label": $0.label] }
         UserDefaults.standard.set(data, forKey: "FaceTrainingData")
     }
     
     func load() {
         guard let data = UserDefaults.standard.array(forKey: "FaceTrainingData") as? [[String: Any]] else { return }
-        trainingData = data.compactMap { dict in
-            guard let features = dict["features"] as? [Float],
+        trainingSamples = data.compactMap { dict in
+            guard let hash = dict["hash"] as? Int,
                   let label = dict["label"] as? String else { return nil }
-            return (features: features, label: label)
+            return TrainingSample(hash: hash, label: label)
         }
         train()
     }
@@ -382,11 +370,11 @@ struct TrainingModeView: View {
         }
         .background(Color.black.opacity(0.9))
         .sheet(isPresented: $showImagePicker) {
-            ImagePicker(images: $capturedImages, name: newPersonName)
+            ImagePicker(images: $capturedImages)
         }
         .onAppear {
             cameraManager.faceClassifier?.load()
-            trainedPeople = Array(Set(cameraManager.faceClassifier?.trainingData.map { $0.label } ?? [])).sorted()
+            trainedPeople = cameraManager.faceClassifier?.getTrainedNames() ?? []
         }
     }
     
@@ -397,7 +385,8 @@ struct TrainingModeView: View {
         
         DispatchQueue.global(qos: .userInitiated).async {
             for image in capturedImages {
-                extractFeatures(from: image, label: newPersonName)
+                let hash = image.hashValue
+                cameraManager.faceClassifier?.addTrainingSample(imageHash: hash, label: newPersonName)
             }
             
             cameraManager.faceClassifier?.train()
@@ -407,35 +396,14 @@ struct TrainingModeView: View {
                 isTraining = false
                 trainingComplete = true
                 capturedImages = []
-                trainedPeople = Array(Set(cameraManager.faceClassifier?.trainingData.map { $0.label } ?? [])).sorted()
+                trainedPeople = cameraManager.faceClassifier?.getTrainedNames() ?? []
             }
         }
-    }
-    
-    func extractFeatures(from image: UIImage, label: String) {
-        guard let cgImage = image.cgImage else { return }
-        
-        let request = VNGenerateImageFeaturePrintRequest()
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        
-        try? handler.perform([request])
-        
-        guard let result = request.results?.first as? VNFeaturePrintObservation else { return }
-        
-        var features: [Float] = []
-        for i in 0..<128 {
-            var value: Float = 0
-            try? result.featurePrint(at: i, value: &value)
-            features.append(value)
-        }
-        
-        cameraManager.faceClassifier?.addTrainingSample(features: features, label: label)
     }
 }
 
 struct ImagePicker: UIViewControllerRepresentable {
     @Binding var images: [UIImage]
-    let name: String
     @Environment(\.presentationMode) var presentationMode
     
     func makeUIViewController(context: Context) -> PHPickerViewController {
