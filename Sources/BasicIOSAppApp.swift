@@ -190,15 +190,17 @@ class CameraManager: NSObject, ObservableObject {
                 }
             }
             
-            if let match = bestMatch, bestDistance < 0.2 {
+            if let match = bestMatch, bestDistance < 0.3 {
                 let distance = sqrt(pow(newRect.midX - match.displayRect.midX, 2) + pow(newRect.midY - match.displayRect.midY, 2))
+                let rawDistance = sqrt(pow(newRect.midX - match.rawRect.midX, 2) + pow(newRect.midY - match.rawRect.midY, 2))
                 
-                var alpha: CGFloat = 0.4
-                if distance > 0.05 {
-                    alpha = 0.6
-                }
-                if distance > 0.1 {
-                    alpha = 0.8
+                var alpha: CGFloat = 0.7
+                if distance < 0.01 {
+                    alpha = 0.2
+                } else if distance < 0.03 {
+                    alpha = 0.4
+                } else if distance > 0.1 {
+                    alpha = 1.0
                 }
                 
                 let smoothX = match.displayRect.midX * (1 - alpha) + newRect.midX * alpha
