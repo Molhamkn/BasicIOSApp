@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import Vision
+import CoreML
 
 struct CameraContainerView: View {
     @StateObject private var cameraManager = CameraManager()
@@ -44,6 +45,7 @@ struct CameraContainerView: View {
 struct FaceTarget: Identifiable {
     let id = UUID()
     var rect: CGRect
+    var confidence: Float = 1.0
 }
 
 class CameraManager: NSObject, ObservableObject {
@@ -62,9 +64,27 @@ class CameraManager: NSObject, ObservableObject {
     private var frameCount = 0
     private let detectEveryNFrames = 5
     
+    private var mlModel: VNCoreMLModel?
+    
     func setup() {
         sequenceHandler = VNSequenceRequestHandler()
+        setupMLModel()
         setupCamera(position: .back)
+    }
+    
+    private func setupMLModel() {
+        do {
+            let config = MLModelConfiguration()
+            config.computeUnits = .all
+            
+            // For now using Vision's built-in face detection
+            // To use custom ML model, replace with:
+            // let model = try YourCustomModel(configuration: config)
+            // mlModel = try VNCoreMLModel(for: model.model)
+            
+        } catch {
+            print("ML Model setup error: \(error)")
+        }
     }
     
     func setupCamera(position: AVCaptureDevice.Position) {
@@ -185,6 +205,17 @@ class CameraManager: NSObject, ObservableObject {
         let faceTargets = rects.map { FaceTarget(rect: $0) }
         onFacesDetected?(faceTargets)
     }
+    
+    func recognizePerson(faceImage: CGImage, completion: @escaping (String?) -> Void) {
+        // Placeholder for person recognition using ML
+        // To implement:
+        // 1. Create a Core ML model using Create ML
+        // 2. Train with images of specific people
+        // 3. Use VNCoreMLRequest with your model here
+        
+        // For now, returns nil (unknown)
+        completion(nil)
+    }
 }
 
 extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -247,14 +278,10 @@ class CameraPreviewUIView: UIView {
         faceLayers.removeAll()
         cornerLayers.removeAll()
         
-        let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene
-        let orientation = windowScene?.interfaceOrientation ?? .portrait
-        
         for face in faces {
-            let screenRect = convertFaceRect(face.rect, bounds: bounds, orientation: orientation)
-            let centerX = screenRect.midX
-            let centerY = screenRect.midY
-            let size = max(screenRect.width, screenRect.height)
+            let centerX = face.rect.midX * bounds.width
+            let centerY = (1 - face.rect.midY) * bounds.height
+            let size = max(face.rect.width, face.rect.height) * bounds.width
             
             let outerRadius = size / 2 + 8
             let innerRadius = size / 2 - 3
@@ -310,10 +337,10 @@ class CameraPreviewUIView: UIView {
             
             let lineLength: CGFloat = 25
             let crosshairOffsets: [(CGFloat, CGFloat)] = [
-                (0, -innerRadius - lineLength),
-                (0, innerRadius + lineLength),
-                (-innerRadius - lineLength, 0),
-                (innerRadius + lineLength, 0)
+                (CGFloat(0), -innerRadius - lineLength),
+                (CGFloat(0), innerRadius + lineLength),
+                (-innerRadius - lineLength, CGFloat(0)),
+                (innerRadius + lineLength, CGFloat(0))
             ]
             
             for (dx, dy) in crosshairOffsets {
@@ -364,36 +391,10 @@ struct IronManHUD: View {
                     TargetCounter(count: faceCount)
                         .padding(.trailing, 20)
                         .padding(.bottom, 20)
+                }
             }
         }
     }
-    
-    private func convertFaceRect(_ faceRect: CGRect, bounds: CGRect, orientation: UIInterfaceOrientation) -> CGRect {
-        let width = faceRect.width * bounds.width
-        let height = faceRect.height * bounds.height
-        var x = faceRect.minX * bounds.width
-        var y = (1 - faceRect.maxY) * bounds.height
-        
-        switch orientation {
-        case .landscapeLeft:
-            let temp = x
-            x = bounds.height - y - height
-            y = temp
-            return CGRect(x: x, y: y, width: height, height: width)
-        case .landscapeRight:
-            let temp = x
-            x = y
-            y = bounds.width - temp - width
-            return CGRect(x: x, y: y, width: height, height: width)
-        case .portraitUpsideDown:
-            x = bounds.width - x - width
-            y = bounds.height - y - height
-            return CGRect(x: x, y: y, width: width, height: height)
-        default:
-            return CGRect(x: x, y: y, width: width, height: height)
-        }
-    }
-}
 }
 
 struct TargetCounter: View {
