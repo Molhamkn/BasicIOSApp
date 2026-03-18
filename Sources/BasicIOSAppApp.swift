@@ -1,13 +1,14 @@
 import SwiftUI
 import AVFoundation
 import Vision
-import CoreML
+import PhotosUI
 
 struct CameraContainerView: View {
     @StateObject private var cameraManager = CameraManager()
     @State private var showCameraSwitcher = false
     @State private var baseZoom: CGFloat = 1.0
     @State private var detectedFaces: [FaceTarget] = []
+    @State private var showTrainingMode = false
     
     var body: some View {
         ZStack {
@@ -28,8 +29,13 @@ struct CameraContainerView: View {
                 currentZoom: cameraManager.zoom,
                 showCameraSwitcher: $showCameraSwitcher,
                 cameraManager: cameraManager,
-                faceCount: detectedFaces.count
+                faceCount: detectedFaces.count,
+                showTrainingMode: $showTrainingMode
             )
+            
+            if showTrainingMode {
+                TrainingModeView(cameraManager: cameraManager, showTrainingMode: $showTrainingMode)
+            }
         }
         .onAppear {
             cameraManager.onFacesDetected = { faces in
@@ -46,12 +52,14 @@ struct FaceTarget: Identifiable {
     let id = UUID()
     var rect: CGRect
     var confidence: Float = 1.0
+    var recognizedName: String? = nil
 }
 
 class CameraManager: NSObject, ObservableObject {
     @Published var zoom: CGFloat = 1.0
     @Published var isFrontCamera: Bool = false
     @Published var isReady: Bool = false
+    @Published var recognizedFaces: [String: String] = [:]
     
     let captureSession = AVCaptureSession()
     var currentInput: AVCaptureDeviceInput?
@@ -64,27 +72,12 @@ class CameraManager: NSObject, ObservableObject {
     private var frameCount = 0
     private let detectEveryNFrames = 5
     
-    private var mlModel: VNCoreMLModel?
+    var faceClassifier: FaceClassifier?
     
     func setup() {
         sequenceHandler = VNSequenceRequestHandler()
-        setupMLModel()
+        faceClassifier = FaceClassifier()
         setupCamera(position: .back)
-    }
-    
-    private func setupMLModel() {
-        do {
-            let config = MLModelConfiguration()
-            config.computeUnits = .all
-            
-            // For now using Vision's built-in face detection
-            // To use custom ML model, replace with:
-            // let model = try YourCustomModel(configuration: config)
-            // mlModel = try VNCoreMLModel(for: model.model)
-            
-        } catch {
-            print("ML Model setup error: \(error)")
-        }
     }
     
     func setupCamera(position: AVCaptureDevice.Position) {
@@ -202,19 +195,15 @@ class CameraManager: NSObject, ObservableObject {
         }
         
         let rects = trackedObservations.map { $0.boundingBox }
-        let faceTargets = rects.map { FaceTarget(rect: $0) }
-        onFacesDetected?(faceTargets)
-    }
-    
-    func recognizePerson(faceImage: CGImage, completion: @escaping (String?) -> Void) {
-        // Placeholder for person recognition using ML
-        // To implement:
-        // 1. Create a Core ML model using Create ML
-        // 2. Train with images of specific people
-        // 3. Use VNCoreMLRequest with your model here
+        var faceTargets = rects.map { FaceTarget(rect: $0) }
         
-        // For now, returns nil (unknown)
-        completion(nil)
+        for i in faceTargets.indices {
+            if let classifier = faceClassifier, let name = classifier.recognize(faceRect: rects[i], in: pixelBuffer) {
+                faceTargets[i].recognizedName = name
+            }
+        }
+        
+        onFacesDetected?(faceTargets)
     }
 }
 
@@ -222,6 +211,269 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         processFrame(pixelBuffer)
+    }
+}
+
+class FaceClassifier {
+    private var trainingData: [(features: [Float], label: String)] = []
+    private var isTrained = false
+    
+    func addTrainingSample(features: [Float], label: String) {
+        trainingData.append((features: features, label: label))
+        isTrained = false
+    }
+    
+    func train() {
+        guard trainingData.count >= 3 else { return }
+        isTrained = true
+    }
+    
+    func recognize(faceRect: CGRect, in pixelBuffer: CVPixelBuffer) -> String? {
+        guard isTrained else { return nil }
+        
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+        
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+        
+        let request = VNGenerateImageFeaturePrintRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        
+        try? handler.perform([request])
+        
+        guard let result = request.results?.first as? VNFeaturePrintObservation else { return nil }
+        
+        var features: [Float] = []
+        for i in 0..<128 {
+            var value: Float = 0
+            try? result.featurePrint(at: i, value: &value)
+            features.append(value)
+        }
+        
+        var bestMatch: (label: String, distance: Float) = (label: "", distance: .greatestFiniteMagnitude)
+        
+        for sample in trainingData {
+            var distance: Float = 0
+            for i in 0..<min(features.count, sample.features.count) {
+                distance += abs(features[i] - sample.features[i])
+            }
+            if distance < bestMatch.distance {
+                bestMatch = (label: sample.label, distance: distance)
+            }
+        }
+        
+        if bestMatch.distance < 50 {
+            return bestMatch.label
+        }
+        return nil
+    }
+    
+    func save() {
+        let data = trainingData.map { ["features": $0.features, "label": $0.label] }
+        UserDefaults.standard.set(data, forKey: "FaceTrainingData")
+    }
+    
+    func load() {
+        guard let data = UserDefaults.standard.array(forKey: "FaceTrainingData") as? [[String: Any]] else { return }
+        trainingData = data.compactMap { dict in
+            guard let features = dict["features"] as? [Float],
+                  let label = dict["label"] as? String else { return nil }
+            return (features: features, label: label)
+        }
+        train()
+    }
+}
+
+struct TrainingModeView: View {
+    @ObservedObject var cameraManager: CameraManager
+    @Binding var showTrainingMode: Bool
+    @State private var newPersonName = ""
+    @State private var capturedImages: [UIImage] = []
+    @State private var showImagePicker = false
+    @State private var isTraining = false
+    @State private var trainingComplete = false
+    @State private var trainedPeople: [String] = []
+    
+    var body: some View {
+        VStack {
+            HStack {
+                Button(action: { showTrainingMode = false }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 24))
+                        .foregroundColor(.white)
+                        .padding()
+                }
+                Spacer()
+                Text("TRAINING MODE")
+                    .font(.system(size: 18, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                Spacer()
+                Button(action: {}) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 24))
+                        .foregroundColor(.white)
+                        .padding()
+                }
+            }
+            .padding(.top, 60)
+            
+            Spacer()
+            
+            Text("Add photos of each person to recognize")
+                .font(.system(size: 16))
+                .foregroundColor(.white)
+                .padding()
+            
+            TextField("Person Name", text: $newPersonName)
+                .textFieldStyle(RoundedBorderTextFieldStyle())
+                .padding(.horizontal, 40)
+            
+            Button(action: { showImagePicker = true }) {
+                HStack {
+                    Image(systemName: "photo.on.rectangle.angled")
+                    Text("Select Photos")
+                }
+                .padding()
+                .background(Color(red: 0.0, green: 0.6, blue: 0.8))
+                .foregroundColor(.white)
+                .cornerRadius(10)
+            }
+            .padding()
+            
+            if !capturedImages.isEmpty {
+                Text("\(capturedImages.count) photos selected")
+                    .foregroundColor(.green)
+                
+                Button(action: trainModel) {
+                    if isTraining {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                    } else {
+                        Text("Train Model")
+                    }
+                }
+                .padding()
+                .background(trainedPeople.isEmpty ? Color.gray : Color.green)
+                .foregroundColor(.white)
+                .cornerRadius(10)
+                .disabled(isTraining || trainedPeople.isEmpty)
+            }
+            
+            if trainingComplete {
+                Text("Training Complete!")
+                    .foregroundColor(.green)
+                    .padding()
+            }
+            
+            if !trainedPeople.isEmpty {
+                VStack(alignment: .leading) {
+                    Text("Trained People:")
+                        .foregroundColor(.white)
+                        .padding(.horizontal)
+                    ForEach(trainedPeople, id: \.self) { name in
+                        Text("• \(name)")
+                            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                            .padding(.horizontal)
+                    }
+                }
+            }
+            
+            Spacer()
+        }
+        .background(Color.black.opacity(0.9))
+        .sheet(isPresented: $showImagePicker) {
+            ImagePicker(images: $capturedImages, name: newPersonName)
+        }
+        .onAppear {
+            cameraManager.faceClassifier?.load()
+            trainedPeople = Array(Set(cameraManager.faceClassifier?.trainingData.map { $0.label } ?? [])).sorted()
+        }
+    }
+    
+    func trainModel() {
+        guard !newPersonName.isEmpty, !capturedImages.isEmpty else { return }
+        
+        isTraining = true
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            for image in capturedImages {
+                extractFeatures(from: image, label: newPersonName)
+            }
+            
+            cameraManager.faceClassifier?.train()
+            cameraManager.faceClassifier?.save()
+            
+            DispatchQueue.main.async {
+                isTraining = false
+                trainingComplete = true
+                capturedImages = []
+                trainedPeople = Array(Set(cameraManager.faceClassifier?.trainingData.map { $0.label } ?? [])).sorted()
+            }
+        }
+    }
+    
+    func extractFeatures(from image: UIImage, label: String) {
+        guard let cgImage = image.cgImage else { return }
+        
+        let request = VNGenerateImageFeaturePrintRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        
+        try? handler.perform([request])
+        
+        guard let result = request.results?.first as? VNFeaturePrintObservation else { return }
+        
+        var features: [Float] = []
+        for i in 0..<128 {
+            var value: Float = 0
+            try? result.featurePrint(at: i, value: &value)
+            features.append(value)
+        }
+        
+        cameraManager.faceClassifier?.addTrainingSample(features: features, label: label)
+    }
+}
+
+struct ImagePicker: UIViewControllerRepresentable {
+    @Binding var images: [UIImage]
+    let name: String
+    @Environment(\.presentationMode) var presentationMode
+    
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration()
+        config.selectionLimit = 20
+        config.filter = .images
+        
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = context.coordinator
+        return picker
+    }
+    
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let parent: ImagePicker
+        
+        init(_ parent: ImagePicker) {
+            self.parent = parent
+        }
+        
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            parent.presentationMode.wrappedValue.dismiss()
+            
+            for result in results {
+                result.itemProvider.loadObject(ofClass: UIImage.self) { object, error in
+                    if let image = object as? UIImage {
+                        DispatchQueue.main.async {
+                            self.parent.images.append(image)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -271,12 +523,15 @@ struct CameraPreviewViewRepresentable: UIViewRepresentable {
 class CameraPreviewUIView: UIView {
     private var faceLayers: [CAShapeLayer] = []
     private var cornerLayers: [CAShapeLayer] = []
+    private var nameLabels: [CATextLayer] = []
     
     func updateFaces(_ faces: [FaceTarget], bounds: CGRect) {
         faceLayers.forEach { $0.removeFromSuperlayer() }
         cornerLayers.forEach { $0.removeFromSuperlayer() }
+        nameLabels.forEach { $0.removeFromSuperlayer() }
         faceLayers.removeAll()
         cornerLayers.removeAll()
+        nameLabels.removeAll()
         
         for face in faces {
             let centerX = face.rect.midX * bounds.width
@@ -354,6 +609,18 @@ class CameraPreviewUIView: UIView {
                 layer.addSublayer(lineLayer)
                 cornerLayers.append(lineLayer)
             }
+            
+            if let name = face.recognizedName {
+                let nameLayer = CATextLayer()
+                nameLayer.string = name
+                nameLayer.fontSize = 14
+                nameLayer.foregroundColor = UIColor(red: 1, green: 0.3, blue: 0, alpha: 1).cgColor
+                nameLayer.backgroundColor = UIColor.black.withAlphaComponent(0.5).cgColor
+                nameLayer.frame = CGRect(x: centerX - 50, y: centerY + innerRadius + 5, width: 100, height: 20)
+                nameLayer.alignmentMode = .center
+                layer.addSublayer(nameLayer)
+                nameLabels.append(nameLayer)
+            }
         }
     }
 }
@@ -363,6 +630,7 @@ struct IronManHUD: View {
     @Binding var showCameraSwitcher: Bool
     let cameraManager: CameraManager
     var faceCount: Int = 0
+    var showTrainingMode: Binding<Bool>? = nil
     
     var body: some View {
         VStack {
@@ -376,6 +644,15 @@ struct IronManHUD: View {
                 ZoomIndicator(zoom: currentZoom)
                     .padding(.trailing, 20)
                     .padding(.top, 20)
+                
+                if let trainingBinding = showTrainingMode {
+                    Button(action: { trainingBinding.wrappedValue.toggle() }) {
+                        Image(systemName: "person.badge.plus")
+                            .font(.system(size: 20))
+                            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                            .padding(.trailing, 10)
+                    }
+                }
             }
             
             Spacer()
