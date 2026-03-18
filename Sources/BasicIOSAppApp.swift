@@ -4,7 +4,7 @@ import AVFoundation
 struct CameraContainerView: View {
     @StateObject private var cameraManager = CameraManager()
     @State private var showCameraSwitcher = false
-    @GestureState private var gestureZoom: CGFloat = 1.0
+    @State private var baseZoom: CGFloat = 1.0
     
     var body: some View {
         ZStack {
@@ -12,12 +12,12 @@ struct CameraContainerView: View {
                 .ignoresSafeArea()
                 .gesture(
                     MagnificationGesture()
-                        .updating($gestureZoom) { value, state, _ in
-                            state = value
+                        .onChanged { value in
+                            let newZoom = baseZoom * value
+                            cameraManager.setZoomImmediate(newZoom)
                         }
                         .onEnded { value in
-                            let newZoom = cameraManager.zoom * value
-                            cameraManager.setZoom(newZoom)
+                            baseZoom = cameraManager.zoom
                         }
                 )
             
@@ -89,6 +89,24 @@ class CameraManager: NSObject, ObservableObject {
             device.videoZoomFactor = zoom
             device.unlockForConfiguration()
         } catch {}
+    }
+    
+    func setZoomImmediate(_ newZoom: CGFloat) {
+        guard let input = currentInput else { return }
+        let device = input.device
+        
+        let maxZoom = min(device.activeFormat.videoMaxZoomFactor, 10.0)
+        let minZoom: CGFloat = 1.0
+        let clampedZoom = max(minZoom, min(newZoom, maxZoom))
+        
+        if abs(zoom - clampedZoom) > 0.01 {
+            zoom = clampedZoom
+            do {
+                try device.lockForConfiguration()
+                device.videoZoomFactor = clampedZoom
+                device.unlockForConfiguration()
+            } catch {}
+        }
     }
 }
 
