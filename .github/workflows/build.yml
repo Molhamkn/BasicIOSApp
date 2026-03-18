@@ -26,8 +26,10 @@ jobs:
     
     - name: Create IPA
       run: |
+        find build -name "*.app" -type d
+        APP_PATH=$(find build -name "*.app" -type d | head -1)
         mkdir -p Payload
-        cp -r build/Build/Products/BasicIOSApp.app Payload/
+        cp -r "$APP_PATH" Payload/
         zip -r BasicIOSApp.ipa Payload
         rm -rf Payload
     
