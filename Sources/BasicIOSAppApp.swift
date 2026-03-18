@@ -210,7 +210,7 @@ struct CameraPreviewViewRepresentable: UIViewRepresentable {
         return view
     }
     
-    func updateUIView(_ uiView: UIView, context: Context) {
+    func updateUIView(_ uiView: CameraPreviewUIView, context: Context) {
         DispatchQueue.main.async {
             uiView.layer.sublayers?.first?.frame = uiView.bounds
             
@@ -232,7 +232,7 @@ struct CameraPreviewViewRepresentable: UIViewRepresentable {
                 }
             }
             
-            (uiView as? CameraPreviewUIView)?.updateFaces(detectedFaces, bounds: uiView.bounds)
+            uiView.updateFaces(detectedFaces, bounds: uiView.bounds)
         }
     }
 }
