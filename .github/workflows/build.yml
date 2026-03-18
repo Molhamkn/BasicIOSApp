@@ -22,4 +22,10 @@ jobs:
     
     - name: Build
       run: |
-        xcodebuild -project BasicIOSApp.xcodeproj -scheme BasicIOSApp -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 16' build
+        xcodebuild -project BasicIOSApp.xcodeproj -scheme BasicIOSApp -configuration Debug -destination 'generic/platform=iOS Simulator' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO -derivedDataPath build build
+    
+    - name: Upload App Bundle
+      uses: actions/upload-artifact@v4
+      with:
+        name: BasicIOSApp.app
+        path: build/Build/Products/BasicIOSApp.app
