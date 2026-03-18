@@ -56,21 +56,12 @@ class CameraManager: NSObject, ObservableObject {
     var videoOutput: AVCaptureVideoDataOutput?
     var onFacesDetected: (([FaceTarget]) -> Void)?
     
-    private let sequenceHandler = VNSequenceRequestHandler()
-    private var trackedFaces: [Int: SmoothedFace] = [:]
-    private var nextFaceID: Int = 0
-    private var lastUpdateTime: Date = Date()
-    
-    struct SmoothedFace {
-        var id: Int
-        var rawRect: CGRect
-        var displayRect: CGRect
-        var velocityX: CGFloat = 0
-        var velocityY: CGFloat = 0
-        var lastSeen: Date
-    }
+    private var sequenceHandler: VNSequenceRequestHandler?
+    private var lastProcessedTime: TimeInterval = 0
+    private let processingInterval: TimeInterval = 1.0 / 30.0
     
     func setup() {
+        sequenceHandler = VNSequenceRequestHandler()
         setupCamera(position: .back)
     }
     
@@ -88,13 +79,25 @@ class CameraManager: NSObject, ObservableObject {
             return
         }
         
+        do {
+            try camera.lockForConfiguration()
+            if camera.activeFormat.videoSupportedFrameRateRanges.contains(where: { $0.maxFrameRate >= 60 }) {
+                camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 60)
+                camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 60)
+            }
+            camera.unlockForConfiguration()
+        } catch {}
+        
         if captureSession.canAddInput(input) {
             captureSession.addInput(input)
             currentInput = input
         }
         
         let output = AVCaptureVideoDataOutput()
-        output.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
+        output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        output.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue", qos: .userInteractive))
+        output.alwaysDiscardsLateVideoFrames = true
+        
         if captureSession.canAddOutput(output) {
             captureSession.addOutput(output)
             videoOutput = output
@@ -104,7 +107,7 @@ class CameraManager: NSObject, ObservableObject {
         isFrontCamera = (position == .front)
         isReady = true
         
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             if self?.captureSession.isRunning == false {
                 self?.captureSession.startRunning()
             }
@@ -150,108 +153,67 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     private func detectFaces(in pixelBuffer: CVPixelBuffer) {
-        let request = VNDetectFaceRectanglesRequest { [weak self] request, error in
-            guard error == nil else { return }
+        let currentTime = CACurrentMediaTime()
+        guard currentTime - lastProcessedTime >= processingInterval else { return }
+        lastProcessedTime = currentTime
+        
+        guard let handler = sequenceHandler else { return }
+        
+        let request = VNDetectFaceLandmarksRequest { [weak self] request, error in
+            guard error == nil else {
+                let rectRequest = VNDetectFaceRectanglesRequest { rectRequest, rectError in
+                    guard rectError == nil else { return }
+                    guard let results = rectRequest.results as? [VNFaceObservation] else { return }
+                    let rects = results.map { $0.boundingBox }
+                    self?.onFacesDetected?(rects.map { FaceTarget(rect: $0) })
+                }
+                try? handler.perform([rectRequest], on: pixelBuffer)
+                return
+            }
             
             guard let results = request.results as? [VNFaceObservation] else { return }
             
-            let rawRects = results.map { $0.boundingBox }
-            let smoothedRects = self?.updateTracking(rawRects) ?? rawRects
-            
-            let faceTargets = smoothedRects.map { FaceTarget(rect: $0) }
-            self?.onFacesDetected?(faceTargets)
-        }
-        
-        try? sequenceHandler.perform([request], on: pixelBuffer)
-    }
-    
-    private func updateTracking(_ newRects: [CGRect]) -> [CGRect] {
-        let now = Date()
-        let dt = now.timeIntervalSince(lastUpdateTime)
-        lastUpdateTime = now
-        
-        var matchedFaces: Set<Int> = []
-        var results: [CGRect] = []
-        
-        for newRect in newRects {
-            var bestMatch: SmoothedFace?
-            var bestDistance: CGFloat = .greatestFiniteMagnitude
-            
-            for (id, tracked) in trackedFaces {
-                if matchedFaces.contains(id) { continue }
-                
-                let dx = newRect.midX - tracked.rawRect.midX
-                let dy = newRect.midY - tracked.rawRect.midY
-                let distance = sqrt(dx * dx + dy * dy)
-                
-                if distance < bestDistance {
-                    bestDistance = distance
-                    bestMatch = tracked
+            let faceRects = results.map { observation -> CGRect in
+                if let landmarks = observation.landmarks {
+                    let allPoints = landmarks.allPoints
+                    let normalizedPoints = allPoints.normalizedPoints
+                    
+                    if !normalizedPoints.isEmpty {
+                        var minX: CGFloat = 1.0
+                        var maxX: CGFloat = 0.0
+                        var minY: CGFloat = 1.0
+                        var maxY: CGFloat = 0.0
+                        
+                        for point in normalizedPoints {
+                            minX = min(minX, point.x)
+                            maxX = max(maxX, point.x)
+                            minY = min(minY, point.y)
+                            maxY = max(maxY, point.y)
+                        }
+                        
+                        let padding: CGFloat = 0.1
+                        let centerX = observation.boundingBox.midX
+                        let centerY = observation.boundingBox.midY
+                        let width = observation.boundingBox.width
+                        let height = observation.boundingBox.height
+                        
+                        return CGRect(
+                            x: centerX - width * (0.5 + padding),
+                            y: centerY - height * (0.5 + padding),
+                            width: width * (1 + padding * 2),
+                            height: height * (1 + padding * 2)
+                        )
+                    }
                 }
+                return observation.boundingBox
             }
             
-            if let match = bestMatch, bestDistance < 0.3 {
-                let distance = sqrt(pow(newRect.midX - match.displayRect.midX, 2) + pow(newRect.midY - match.displayRect.midY, 2))
-                let rawDistance = sqrt(pow(newRect.midX - match.rawRect.midX, 2) + pow(newRect.midY - match.rawRect.midY, 2))
-                
-                var alpha: CGFloat = 0.7
-                if distance < 0.01 {
-                    alpha = 0.2
-                } else if distance < 0.03 {
-                    alpha = 0.4
-                } else if distance > 0.1 {
-                    alpha = 1.0
-                }
-                
-                let smoothX = match.displayRect.midX * (1 - alpha) + newRect.midX * alpha
-                let smoothY = match.displayRect.midY * (1 - alpha) + newRect.midY * alpha
-                
-                let vx = (newRect.midX - match.rawRect.midX) / CGFloat(max(dt, 0.016))
-                let vy = (newRect.midY - match.rawRect.midY) / CGFloat(max(dt, 0.016))
-                
-                let smoothW = match.displayRect.width * (1 - alpha * 0.5) + newRect.width * alpha * 0.5
-                let smoothH = match.displayRect.height * (1 - alpha * 0.5) + newRect.height * alpha * 0.5
-                
-                let smoothedRect = CGRect(
-                    x: smoothX - smoothW / 2,
-                    y: smoothY - smoothH / 2,
-                    width: smoothW,
-                    height: smoothH
-                )
-                
-                trackedFaces[match.id] = SmoothedFace(
-                    id: match.id,
-                    rawRect: newRect,
-                    displayRect: smoothedRect,
-                    velocityX: vx,
-                    velocityY: vy,
-                    lastSeen: now
-                )
-                matchedFaces.insert(match.id)
-                results.append(smoothedRect)
-            } else {
-                let newID = nextFaceID
-                nextFaceID += 1
-                trackedFaces[newID] = SmoothedFace(
-                    id: newID,
-                    rawRect: newRect,
-                    displayRect: newRect,
-                    velocityX: 0,
-                    velocityY: 0,
-                    lastSeen: now
-                )
-                matchedFaces.insert(newID)
-                results.append(newRect)
-            }
+            self?.onFacesDetected?(faceRects.map { FaceTarget(rect: $0) })
         }
         
-        for (id, _) in trackedFaces {
-            if !matchedFaces.contains(id) {
-                trackedFaces.removeValue(forKey: id)
-            }
-        }
+        request.preferBackgroundProcessing = false
         
-        return results
+        try? handler.perform([request], on: pixelBuffer)
     }
 }
 
