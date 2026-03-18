@@ -2,8 +2,8 @@ import SwiftUI
 import AVFoundation
 
 struct CameraView: UIViewRepresentable {
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView(frame: .zero)
+    func makeUIView(context: Context) -> CameraPreviewView {
+        let view = CameraPreviewView()
         view.backgroundColor = .black
         
         let captureSession = AVCaptureSession()
@@ -20,10 +20,8 @@ struct CameraView: UIViewRepresentable {
         
         let previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
         previewLayer.videoGravity = .resizeAspectFill
-        view.layer.addSublayer(previewLayer)
-        
-        context.coordinator.previewLayer = previewLayer
-        context.coordinator.captureSession = captureSession
+        view.previewLayer = previewLayer
+        view.captureSession = captureSession
         
         DispatchQueue.global(qos: .userInitiated).async {
             captureSession.startRunning()
@@ -32,11 +30,7 @@ struct CameraView: UIViewRepresentable {
         return view
     }
     
-    func updateUIView(_ uiView: UIView, context: Context) {
-        DispatchQueue.main.async {
-            uiView.layer.sublayers?.first?.frame = uiView.bounds
-        }
-    }
+    func updateUIView(_ uiView: CameraPreviewView, context: Context) {}
     
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -44,10 +38,27 @@ struct CameraView: UIViewRepresentable {
     
     class Coordinator: NSObject {
         var captureSession: AVCaptureSession?
-        var previewLayer: AVCaptureVideoPreviewLayer?
         
         deinit {
             captureSession?.stopRunning()
+        }
+    }
+}
+
+class CameraPreviewView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
+    var previewLayer: AVCaptureVideoPreviewLayer?
+    var captureSession: AVCaptureSession?
+    private var videoOutput: AVCaptureVideoDataOutput?
+    
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        previewLayer?.frame = bounds
+    }
+    
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            updateOrientation()
         }
     }
 }
