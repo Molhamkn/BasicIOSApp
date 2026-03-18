@@ -51,6 +51,7 @@ struct CameraView: UIViewRepresentable {
         var captureSession: AVCaptureSession?
         var previewLayer: AVCaptureVideoPreviewLayer?
         var camera: AVCaptureDevice?
+        var currentZoom: CGFloat = 1.0
         
         @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
             guard let camera = camera else { return }
@@ -59,8 +60,14 @@ struct CameraView: UIViewRepresentable {
                 try camera.lockForConfiguration()
                 let maxZoom = min(camera.activeFormat.videoMaxZoomFactor, 10.0)
                 let minZoom: CGFloat = 1.0
-                let newZoom = minZoom * gesture.scale
-                camera.videoZoomFactor = max(minZoom, min(newZoom, maxZoom))
+                
+                if gesture.state == .began {
+                    currentZoom = camera.videoZoomFactor
+                } else if gesture.state == .changed {
+                    let newZoom = currentZoom * gesture.scale
+                    camera.videoZoomFactor = max(minZoom, min(newZoom, maxZoom))
+                }
+                
                 camera.unlockForConfiguration()
             } catch {}
         }
