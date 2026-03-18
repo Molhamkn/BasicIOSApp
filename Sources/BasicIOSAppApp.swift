@@ -77,9 +77,6 @@ struct BasicIOSAppApp: App {
         WindowGroup {
             CameraView()
                 .ignoresSafeArea()
-                .onAppear {
-                    UIApplication.shared.setStatusBarOrientation(.landscapeRight)
-                }
         }
     }
 }
