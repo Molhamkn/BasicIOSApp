@@ -44,7 +44,7 @@ struct CameraContainerView: View {
 struct FaceTarget: Identifiable {
     let id = UUID()
     var rect: CGRect
-    var trackingID: Int?
+    var velocity: CGPoint = .zero
 }
 
 class CameraManager: NSObject, ObservableObject {
@@ -58,7 +58,14 @@ class CameraManager: NSObject, ObservableObject {
     var onFacesDetected: (([FaceTarget]) -> Void)?
     
     private let sequenceHandler = VNSequenceRequestHandler()
-    private var lastFaceRects: [CGRect] = []
+    private var trackedFaces: [Int: TrackedFace] = [:]
+    private var nextFaceID: Int = 0
+    
+    struct TrackedFace {
+        var id: Int
+        var smoothedRect: CGRect
+        var lastUpdate: Date
+    }
     
     func setup() {
         setupCamera(position: .back)
@@ -146,8 +153,7 @@ class CameraManager: NSObject, ObservableObject {
             guard let results = request.results as? [VNFaceObservation] else { return }
             
             let rawRects = results.map { $0.boundingBox }
-            
-            let smoothedRects = self?.smoothFaces(rawRects) ?? rawRects
+            let smoothedRects = self?.smoothAndTrackFaces(rawRects) ?? rawRects
             
             let faceTargets = smoothedRects.map { FaceTarget(rect: $0) }
             self?.onFacesDetected?(faceTargets)
@@ -156,38 +162,51 @@ class CameraManager: NSObject, ObservableObject {
         try? sequenceHandler.perform([request], on: pixelBuffer)
     }
     
-    private func smoothFaces(_ newRects: [CGRect]) -> [CGRect] {
+    private func smoothAndTrackFaces(_ newRects: [CGRect]) -> [CGRect] {
         var smoothed: [CGRect] = []
+        let now = Date()
+        
+        var matchedFaces: Set<Int> = []
         
         for newRect in newRects {
-            var bestMatch: CGRect?
+            var bestMatch: TrackedFace?
             var bestDistance: CGFloat = .greatestFiniteMagnitude
             
-            for oldRect in lastFaceRects {
-                let dx = abs(newRect.midX - oldRect.midX)
-                let dy = abs(newRect.midY - oldRect.midY)
-                let distance = dx + dy
+            for (id, tracked) in trackedFaces {
+                if matchedFaces.contains(id) { continue }
+                
+                let dx = newRect.midX - tracked.smoothedRect.midX
+                let dy = newRect.midY - tracked.smoothedRect.midY
+                let distance = sqrt(dx * dx + dy * dy)
                 
                 if distance < bestDistance {
                     bestDistance = distance
-                    bestMatch = oldRect
+                    bestMatch = tracked
                 }
             }
             
-            if let match = bestMatch, bestDistance < 0.1 {
+            if let match = bestMatch, bestDistance < 0.15 {
+                let alpha: CGFloat = 0.3
                 let smoothedRect = CGRect(
-                    x: match.minX * 0.7 + newRect.minX * 0.3,
-                    y: match.minY * 0.7 + newRect.minY * 0.3,
-                    width: match.width * 0.7 + newRect.width * 0.3,
-                    height: match.height * 0.7 + newRect.height * 0.3
+                    x: match.smoothedRect.minX * (1 - alpha) + newRect.minX * alpha,
+                    y: match.smoothedRect.minY * (1 - alpha) + newRect.minY * alpha,
+                    width: match.smoothedRect.width * (1 - alpha) + newRect.width * alpha,
+                    height: match.smoothedRect.height * (1 - alpha) + newRect.height * alpha
                 )
+                trackedFaces[match.id] = TrackedFace(id: match.id, smoothedRect: smoothedRect, lastUpdate: now)
+                matchedFaces.insert(match.id)
                 smoothed.append(smoothedRect)
             } else {
+                let newID = nextFaceID
+                nextFaceID += 1
+                trackedFaces[newID] = TrackedFace(id: newID, smoothedRect: newRect, lastUpdate: now)
+                matchedFaces.insert(newID)
                 smoothed.append(newRect)
             }
         }
         
-        lastFaceRects = newRects
+        trackedFaces = trackedFaces.filter { matchedFaces.contains($0.key) }
+        
         return smoothed
     }
 }
@@ -253,17 +272,12 @@ class CameraPreviewUIView: UIView {
         cornerLayers.removeAll()
         
         for face in faces {
-            let x = face.rect.minX * bounds.width
-            let y = (1 - face.rect.maxY) * bounds.height
-            let width = face.rect.width * bounds.width
-            let height = face.rect.height * bounds.height
+            let centerX = face.rect.midX * bounds.width
+            let centerY = (1 - face.rect.midY) * bounds.height
+            let size = max(face.rect.width, face.rect.height) * bounds.width
             
-            let centerX = x + width / 2
-            let centerY = y + height / 2
-            let size = max(width, height)
-            
-            let outerRadius = size / 2 + 10
-            let innerRadius = size / 2 - 5
+            let outerRadius = size / 2 + 8
+            let innerRadius = size / 2 - 3
             
             let outerCircle = CAShapeLayer()
             outerCircle.path = UIBezierPath(arcCenter: CGPoint(x: centerX, y: centerY),
@@ -274,7 +288,7 @@ class CameraPreviewUIView: UIView {
             outerCircle.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 1).cgColor
             outerCircle.fillColor = UIColor.clear.cgColor
             outerCircle.lineWidth = 1
-            outerCircle.lineDashPattern = [5, 5]
+            outerCircle.lineDashPattern = [4, 4]
             layer.addSublayer(outerCircle)
             faceLayers.append(outerCircle)
             
@@ -290,7 +304,7 @@ class CameraPreviewUIView: UIView {
             layer.addSublayer(innerCircle)
             faceLayers.append(innerCircle)
             
-            let cornerSize: CGFloat = 15
+            let cornerSize: CGFloat = 12
             let corners: [(CGPoint, CGFloat)] = [
                 (CGPoint(x: centerX - innerRadius, y: centerY - innerRadius), 0),
                 (CGPoint(x: centerX + innerRadius, y: centerY - innerRadius), .pi / 2),
@@ -314,7 +328,7 @@ class CameraPreviewUIView: UIView {
                 cornerLayers.append(cornerLayer)
             }
             
-            let lineLength: CGFloat = 30
+            let lineLength: CGFloat = 25
             let crosshairOffsets: [(CGFloat, CGFloat)] = [
                 (0, -innerRadius - lineLength),
                 (0, innerRadius + lineLength),
@@ -328,7 +342,7 @@ class CameraPreviewUIView: UIView {
                 path.move(to: CGPoint(x: centerX, y: centerY))
                 path.addLine(to: CGPoint(x: centerX + dx, y: centerY + dy))
                 lineLayer.path = path.cgPath
-                lineLayer.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 0.7).cgColor
+                lineLayer.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 0.8).cgColor
                 lineLayer.lineWidth = 1
                 layer.addSublayer(lineLayer)
                 cornerLayers.append(lineLayer)
