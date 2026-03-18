@@ -176,8 +176,8 @@ class CameraManager: NSObject, ObservableObject {
             
             if let match = bestMatch, bestDistance < 0.1 {
                 let smoothedRect = CGRect(
-                    x: match.x * 0.7 + newRect.x * 0.3,
-                    y: match.y * 0.7 + newRect.y * 0.3,
+                    x: match.minX * 0.7 + newRect.minX * 0.3,
+                    y: match.minY * 0.7 + newRect.minY * 0.3,
                     width: match.width * 0.7 + newRect.width * 0.3,
                     height: match.height * 0.7 + newRect.height * 0.3
                 )
