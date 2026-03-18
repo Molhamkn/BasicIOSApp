@@ -1,4 +1,6 @@
 name: BasicIOSApp
+options:
+  bundleIdPrefix: com.example
 targets:
   BasicIOSApp:
     type: application
@@ -18,3 +20,5 @@ targets:
         CODE_SIGN_IDENTITY: ""
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGNING_ALLOWED: NO
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        TARGETED_DEVICE_FAMILY: "1,2"

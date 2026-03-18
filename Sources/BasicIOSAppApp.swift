@@ -4,7 +4,8 @@ import SwiftUI
 struct BasicIOSAppApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            Text("Hello iOS!")
+                .padding()
         }
     }
 }
