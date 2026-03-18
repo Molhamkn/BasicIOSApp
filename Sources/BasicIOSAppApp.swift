@@ -2,8 +2,8 @@ import SwiftUI
 import AVFoundation
 
 struct CameraView: UIViewRepresentable {
-    func makeUIView(context: Context) -> CameraPreviewView {
-        let view = CameraPreviewView()
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
         view.backgroundColor = .black
         
         let captureSession = AVCaptureSession()
@@ -20,8 +20,9 @@ struct CameraView: UIViewRepresentable {
         
         let previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
         previewLayer.videoGravity = .resizeAspectFill
-        view.previewLayer = previewLayer
+        view.layer.addSublayer(previewLayer)
         
+        context.coordinator.previewLayer = previewLayer
         context.coordinator.captureSession = captureSession
         
         DispatchQueue.global(qos: .userInitiated).async {
@@ -31,9 +32,9 @@ struct CameraView: UIViewRepresentable {
         return view
     }
     
-    func updateUIView(_ uiView: CameraPreviewView, context: Context) {
+    func updateUIView(_ uiView: UIView, context: Context) {
         DispatchQueue.main.async {
-            uiView.updateOrientation()
+            uiView.layer.sublayers?.first?.frame = uiView.bounds
         }
     }
     
@@ -43,40 +44,10 @@ struct CameraView: UIViewRepresentable {
     
     class Coordinator: NSObject {
         var captureSession: AVCaptureSession?
+        var previewLayer: AVCaptureVideoPreviewLayer?
         
         deinit {
             captureSession?.stopRunning()
-        }
-    }
-}
-
-class CameraPreviewView: UIView {
-    var previewLayer: AVCaptureVideoPreviewLayer?
-    
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        previewLayer?.frame = bounds
-        updateOrientation()
-    }
-    
-    func updateOrientation() {
-        guard let connection = previewLayer?.connection,
-              connection.isVideoOrientationSupported else { return }
-        
-        let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene
-        let orientation = windowScene?.interfaceOrientation ?? .portrait
-        
-        switch orientation {
-        case .portrait:
-            connection.videoOrientation = .portrait
-        case .portraitUpsideDown:
-            connection.videoOrientation = .portraitUpsideDown
-        case .landscapeLeft:
-            connection.videoOrientation = .landscapeLeft
-        case .landscapeRight:
-            connection.videoOrientation = .landscapeRight
-        default:
-            connection.videoOrientation = .portrait
         }
     }
 }
@@ -87,7 +58,6 @@ struct BasicIOSAppApp: App {
         WindowGroup {
             CameraView()
                 .ignoresSafeArea()
-                .statusBar(hidden: true)
         }
     }
 }
