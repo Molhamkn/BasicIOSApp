@@ -57,8 +57,10 @@ class CameraManager: NSObject, ObservableObject {
     var onFacesDetected: (([FaceTarget]) -> Void)?
     
     private var sequenceHandler: VNSequenceRequestHandler?
-    private var lastProcessedTime: TimeInterval = 0
-    private let processingInterval: TimeInterval = 1.0 / 30.0
+    private var isTracking = false
+    private var trackedObservations: [VNDetectedObjectObservation] = []
+    private var frameCount = 0
+    private let detectEveryNFrames = 5
     
     func setup() {
         sequenceHandler = VNSequenceRequestHandler()
@@ -79,15 +81,6 @@ class CameraManager: NSObject, ObservableObject {
             return
         }
         
-        do {
-            try camera.lockForConfiguration()
-            if camera.activeFormat.videoSupportedFrameRateRanges.contains(where: { $0.maxFrameRate >= 60 }) {
-                camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 60)
-                camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 60)
-            }
-            camera.unlockForConfiguration()
-        } catch {}
-        
         if captureSession.canAddInput(input) {
             captureSession.addInput(input)
             currentInput = input
@@ -106,6 +99,8 @@ class CameraManager: NSObject, ObservableObject {
         captureSession.commitConfiguration()
         isFrontCamera = (position == .front)
         isReady = true
+        isTracking = false
+        trackedObservations = []
         
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             if self?.captureSession.isRunning == false {
@@ -152,44 +147,60 @@ class CameraManager: NSObject, ObservableObject {
         }
     }
     
-    private func detectFaces(in pixelBuffer: CVPixelBuffer) {
-        let currentTime = CACurrentMediaTime()
-        guard currentTime - lastProcessedTime >= processingInterval else { return }
-        lastProcessedTime = currentTime
-        
+    private func processFrame(_ pixelBuffer: CVPixelBuffer) {
         guard let handler = sequenceHandler else { return }
         
-        let request = VNDetectFaceLandmarksRequest { [weak self] request, error in
-            guard error == nil else {
-                let rectRequest = VNDetectFaceRectanglesRequest { rectRequest, rectError in
-                    guard rectError == nil else { return }
-                    guard let results = rectRequest.results as? [VNFaceObservation] else { return }
-                    let rects = results.map { $0.boundingBox }
-                    self?.onFacesDetected?(rects.map { FaceTarget(rect: $0) })
+        frameCount += 1
+        
+        if frameCount % detectEveryNFrames == 0 || !isTracking || trackedObservations.isEmpty {
+            let detectRequest = VNDetectFaceRectanglesRequest { [weak self] request, error in
+                guard error == nil else { return }
+                guard let results = request.results as? [VNFaceObservation] else {
+                    self?.isTracking = false
+                    self?.trackedObservations = []
+                    return
                 }
-                try? handler.perform([rectRequest], on: pixelBuffer)
-                return
+                
+                if !results.isEmpty {
+                    self?.trackedObservations = results.map { $0 }
+                    self?.isTracking = true
+                } else {
+                    self?.isTracking = false
+                }
             }
             
-            guard let results = request.results as? [VNFaceObservation] else { return }
-            
-            let faceRects = results.map { observation -> CGRect in
-                return observation.boundingBox
+            try? handler.perform([detectRequest], on: pixelBuffer)
+        } else if isTracking && !trackedObservations.isEmpty {
+            let trackRequest = VNTrackRectanglesRequest { [weak self] request, error in
+                guard error == nil else {
+                    self?.isTracking = false
+                    return
+                }
+                guard let results = request.results as? [VNDetectedObjectObservation] else {
+                    return
+                }
+                
+                if !results.isEmpty {
+                    self?.trackedObservations = results
+                } else {
+                    self?.isTracking = false
+                }
             }
             
-            self?.onFacesDetected?(faceRects.map { FaceTarget(rect: $0) })
+            trackRequest.lastFrame = trackedObservations.first
+            try? handler.perform([trackRequest], on: pixelBuffer)
         }
         
-        request.preferBackgroundProcessing = false
-        
-        try? handler.perform([request], on: pixelBuffer)
+        let rects = trackedObservations.map { $0.boundingBox }
+        let faceTargets = rects.map { FaceTarget(rect: $0) }
+        onFacesDetected?(faceTargets)
     }
 }
 
 extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        detectFaces(in: pixelBuffer)
+        processFrame(pixelBuffer)
     }
 }
 
@@ -209,7 +220,7 @@ struct CameraPreviewViewRepresentable: UIViewRepresentable {
         return view
     }
     
-    func updateUIView(_ uiView: CameraPreviewUIView, context: Context) {
+    func updateUIView(_ uiView: UIView, context: Context) {
         DispatchQueue.main.async {
             uiView.layer.sublayers?.first?.frame = uiView.bounds
             
