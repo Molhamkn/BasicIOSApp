@@ -195,14 +195,7 @@ class CameraManager: NSObject, ObservableObject {
         }
         
         let rects = trackedObservations.map { $0.boundingBox }
-        var faceTargets = rects.map { FaceTarget(rect: $0) }
-        
-        for i in faceTargets.indices {
-            if let classifier = faceClassifier,
-               let name = classifier.recognize(faceRect: rects[i], in: pixelBuffer) {
-                faceTargets[i].recognizedName = name
-            }
-        }
+        let faceTargets = rects.map { FaceTarget(rect: $0) }
         
         onFacesDetected?(faceTargets)
     }
