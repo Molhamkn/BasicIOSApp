@@ -95,31 +95,22 @@ class CameraManager: NSObject, ObservableObject {
 struct CameraPreviewViewRepresentable: UIViewRepresentable {
     @ObservedObject var cameraManager: CameraManager
     
-    func makeUIView(context: Context) -> CameraPreviewUIView {
-        let view = CameraPreviewUIView()
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
         view.backgroundColor = .black
         
         let previewLayer = AVCaptureVideoPreviewLayer(session: cameraManager.captureSession)
         previewLayer.videoGravity = .resizeAspectFill
-        previewLayer.connection?.videoOrientation = .landscapeRight
-        view.previewLayer = previewLayer
-        view.cameraManager = cameraManager
+        previewLayer.frame = UIScreen.main.bounds
+        view.layer.addSublayer(previewLayer)
         
         return view
     }
     
-    func updateUIView(_ uiView: CameraPreviewUIView, context: Context) {
-        uiView.previewLayer?.frame = uiView.bounds
-    }
-}
-
-class CameraPreviewUIView: UIView {
-    var previewLayer: AVCaptureVideoPreviewLayer?
-    weak var cameraManager: CameraManager?
-    
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        previewLayer?.frame = bounds
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async {
+            uiView.layer.sublayers?.first?.frame = uiView.bounds
+        }
     }
 }
 
