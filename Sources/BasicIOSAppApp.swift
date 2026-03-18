@@ -77,6 +77,7 @@ class CameraManager: NSObject, ObservableObject {
     func setup() {
         sequenceHandler = VNSequenceRequestHandler()
         faceClassifier = FaceClassifier()
+        faceClassifier?.load()
         setupCamera(position: .back)
     }
     
@@ -194,8 +195,13 @@ class CameraManager: NSObject, ObservableObject {
             }
         }
         
-        let rects = trackedObservations.map { $0.boundingBox }
-        let faceTargets = rects.map { FaceTarget(rect: $0) }
+        var faceTargets = trackedObservations.map { observation -> FaceTarget in
+            var target = FaceTarget(rect: observation.boundingBox)
+            if let name = faceClassifier?.recognize(faceRect: observation.boundingBox) {
+                target.recognizedName = name
+            }
+            return target
+        }
         
         onFacesDetected?(faceTargets)
     }
@@ -210,36 +216,38 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
 class FaceClassifier {
     struct TrainingSample {
-        var hash: Int
+        var aspectRatio: CGFloat
+        var relativeSize: CGFloat
         var label: String
     }
     
     private var trainingSamples: [TrainingSample] = []
     private var isTrained = false
     
-    func addTrainingSample(imageHash: Int, label: String) {
-        trainingSamples.append(TrainingSample(hash: imageHash, label: label))
-        isTrained = false
-    }
-    
-    func train() {
-        guard trainingSamples.count >= 3 else { return }
+    func addTrainingSample(aspectRatio: CGFloat, relativeSize: CGFloat, label: String) {
+        trainingSamples.append(TrainingSample(aspectRatio: aspectRatio, relativeSize: relativeSize, label: label))
         isTrained = true
     }
     
-    func recognize(imageHash: Int) -> String? {
+    func recognize(faceRect: CGRect) -> String? {
         guard isTrained, !trainingSamples.isEmpty else { return nil }
         
-        var bestMatch: (label: String, distance: Int) = (label: "", distance: Int.max)
+        let inputAspect = faceRect.width / max(faceRect.height, 0.001)
+        let inputSize = faceRect.width * faceRect.height
+        
+        var bestMatch: (label: String, score: CGFloat) = (label: "", score: 0)
         
         for sample in trainingSamples {
-            let distance = abs(imageHash - sample.hash)
-            if distance < bestMatch.distance {
-                bestMatch = (label: sample.label, distance: distance)
+            let aspectDiff = abs(inputAspect - sample.aspectRatio)
+            let sizeDiff = abs(inputSize - sample.relativeSize)
+            let score = 1 / (aspectDiff + sizeDiff + 0.001)
+            
+            if score > bestMatch.score {
+                bestMatch = (label: sample.label, score: score)
             }
         }
         
-        if bestMatch.distance < 50000000 {
+        if bestMatch.score > 100 {
             return bestMatch.label
         }
         return nil
@@ -250,18 +258,25 @@ class FaceClassifier {
     }
     
     func save() {
-        let data = trainingSamples.map { ["hash": $0.hash, "label": $0.label] }
+        let data = trainingSamples.map { ["aspectRatio": $0.aspectRatio, "relativeSize": $0.relativeSize, "label": $0.label] }
         UserDefaults.standard.set(data, forKey: "FaceTrainingData")
     }
     
     func load() {
         guard let data = UserDefaults.standard.array(forKey: "FaceTrainingData") as? [[String: Any]] else { return }
         trainingSamples = data.compactMap { dict in
-            guard let hash = dict["hash"] as? Int,
+            guard let aspectRatio = dict["aspectRatio"] as? CGFloat,
+                  let relativeSize = dict["relativeSize"] as? CGFloat,
                   let label = dict["label"] as? String else { return nil }
-            return TrainingSample(hash: hash, label: label)
+            return TrainingSample(aspectRatio: aspectRatio, relativeSize: relativeSize, label: label)
         }
-        train()
+        isTrained = !trainingSamples.isEmpty
+    }
+    
+    func clear() {
+        trainingSamples = []
+        isTrained = false
+        UserDefaults.standard.removeObject(forKey: "FaceTrainingData")
     }
 }
 
@@ -274,6 +289,7 @@ struct TrainingModeView: View {
     @State private var isTraining = false
     @State private var trainingComplete = false
     @State private var trainedPeople: [String] = []
+    @State private var showClearAlert = false
     
     var body: some View {
         VStack {
@@ -289,10 +305,10 @@ struct TrainingModeView: View {
                     .font(.system(size: 18, weight: .bold, design: .monospaced))
                     .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
                 Spacer()
-                Button(action: {}) {
-                    Image(systemName: "info.circle")
-                        .font(.system(size: 24))
-                        .foregroundColor(.white)
+                Button(action: { showClearAlert = true }) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 20))
+                        .foregroundColor(.red)
                         .padding()
                 }
             }
@@ -321,28 +337,41 @@ struct TrainingModeView: View {
             }
             .padding()
             
-            if !capturedImages.isEmpty && !newPersonName.isEmpty {
+            if !capturedImages.isEmpty {
                 Text("\(capturedImages.count) photos selected")
                     .foregroundColor(.green)
+                    .padding(.vertical, 5)
+                
+                HStack {
+                    ForEach(0..<min(capturedImages.count, 4), id: \.self) { i in
+                        Image(uiImage: capturedImages[i])
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 60, height: 60)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                .padding(.vertical, 5)
                 
                 Button(action: trainModel) {
                     if isTraining {
                         ProgressView()
                             .progressViewStyle(CircularProgressViewStyle(tint: .white))
                     } else {
-                        Text("Train Model")
+                        Text("TRAIN: \(newPersonName)")
                     }
                 }
                 .padding()
                 .background(Color.green)
                 .foregroundColor(.white)
                 .cornerRadius(10)
-                .disabled(isTraining)
+                .disabled(isTraining || newPersonName.isEmpty)
             }
             
             if trainingComplete {
-                Text("Training Complete!")
+                Text("Trained!")
                     .foregroundColor(.green)
+                    .font(.headline)
                     .padding()
             }
             
@@ -357,6 +386,7 @@ struct TrainingModeView: View {
                             .padding(.horizontal)
                     }
                 }
+                .padding(.top)
             }
             
             Spacer()
@@ -365,8 +395,14 @@ struct TrainingModeView: View {
         .sheet(isPresented: $showImagePicker) {
             ImagePicker(images: $capturedImages)
         }
+        .alert("Clear All Training?", isPresented: $showClearAlert) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear", role: .destructive) {
+                cameraManager.faceClassifier?.clear()
+                trainedPeople = []
+            }
+        }
         .onAppear {
-            cameraManager.faceClassifier?.load()
             trainedPeople = cameraManager.faceClassifier?.getTrainedNames() ?? []
         }
     }
@@ -378,11 +414,15 @@ struct TrainingModeView: View {
         
         DispatchQueue.global(qos: .userInitiated).async {
             for image in capturedImages {
-                let hash = image.hashValue
-                cameraManager.faceClassifier?.addTrainingSample(imageHash: hash, label: newPersonName)
+                if let features = extractFaceFeatures(from: image) {
+                    cameraManager.faceClassifier?.addTrainingSample(
+                        aspectRatio: features.aspectRatio,
+                        relativeSize: features.relativeSize,
+                        label: newPersonName
+                    )
+                }
             }
             
-            cameraManager.faceClassifier?.train()
             cameraManager.faceClassifier?.save()
             
             DispatchQueue.main.async {
@@ -390,8 +430,30 @@ struct TrainingModeView: View {
                 trainingComplete = true
                 capturedImages = []
                 trainedPeople = cameraManager.faceClassifier?.getTrainedNames() ?? []
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    trainingComplete = false
+                }
             }
         }
+    }
+    
+    func extractFaceFeatures(from image: UIImage) -> (aspectRatio: CGFloat, relativeSize: CGFloat)? {
+        guard let cgImage = image.cgImage else { return nil }
+        
+        let request = VNDetectFaceRectanglesRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        
+        try? handler.perform([request])
+        
+        guard let results = request.results, !results.isEmpty else { return nil }
+        
+        let face = results[0].boundingBox
+        
+        return (
+            aspectRatio: face.width / max(face.height, 0.001),
+            relativeSize: face.width * face.height
+        )
     }
 }
 
