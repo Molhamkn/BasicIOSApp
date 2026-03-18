@@ -6,7 +6,7 @@ struct CameraContainerView: View {
     @StateObject private var cameraManager = CameraManager()
     @State private var showCameraSwitcher = false
     @State private var baseZoom: CGFloat = 1.0
-    @State private var detectedFaces: [CGRect] = []
+    @State private var detectedFaces: [FaceTarget] = []
     
     var body: some View {
         ZStack {
@@ -41,6 +41,12 @@ struct CameraContainerView: View {
     }
 }
 
+struct FaceTarget: Identifiable {
+    let id = UUID()
+    var rect: CGRect
+    var trackingID: Int?
+}
+
 class CameraManager: NSObject, ObservableObject {
     @Published var zoom: CGFloat = 1.0
     @Published var isFrontCamera: Bool = false
@@ -49,9 +55,10 @@ class CameraManager: NSObject, ObservableObject {
     let captureSession = AVCaptureSession()
     var currentInput: AVCaptureDeviceInput?
     var videoOutput: AVCaptureVideoDataOutput?
-    var onFacesDetected: (([CGRect]) -> Void)?
+    var onFacesDetected: (([FaceTarget]) -> Void)?
     
     private let sequenceHandler = VNSequenceRequestHandler()
+    private var lastFaceRects: [CGRect] = []
     
     func setup() {
         setupCamera(position: .back)
@@ -138,11 +145,50 @@ class CameraManager: NSObject, ObservableObject {
             
             guard let results = request.results as? [VNFaceObservation] else { return }
             
-            let faceRects = results.map { $0.boundingBox }
-            self?.onFacesDetected?(faceRects)
+            let rawRects = results.map { $0.boundingBox }
+            
+            let smoothedRects = self?.smoothFaces(rawRects) ?? rawRects
+            
+            let faceTargets = smoothedRects.map { FaceTarget(rect: $0) }
+            self?.onFacesDetected?(faceTargets)
         }
         
         try? sequenceHandler.perform([request], on: pixelBuffer)
+    }
+    
+    private func smoothFaces(_ newRects: [CGRect]) -> [CGRect] {
+        var smoothed: [CGRect] = []
+        
+        for newRect in newRects {
+            var bestMatch: CGRect?
+            var bestDistance: CGFloat = .greatestFiniteMagnitude
+            
+            for oldRect in lastFaceRects {
+                let dx = abs(newRect.midX - oldRect.midX)
+                let dy = abs(newRect.midY - oldRect.midY)
+                let distance = dx + dy
+                
+                if distance < bestDistance {
+                    bestDistance = distance
+                    bestMatch = oldRect
+                }
+            }
+            
+            if let match = bestMatch, bestDistance < 0.1 {
+                let smoothedRect = CGRect(
+                    x: match.x * 0.7 + newRect.x * 0.3,
+                    y: match.y * 0.7 + newRect.y * 0.3,
+                    width: match.width * 0.7 + newRect.width * 0.3,
+                    height: match.height * 0.7 + newRect.height * 0.3
+                )
+                smoothed.append(smoothedRect)
+            } else {
+                smoothed.append(newRect)
+            }
+        }
+        
+        lastFaceRects = newRects
+        return smoothed
     }
 }
 
@@ -155,7 +201,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
 struct CameraPreviewViewRepresentable: UIViewRepresentable {
     @ObservedObject var cameraManager: CameraManager
-    var detectedFaces: [CGRect]
+    var detectedFaces: [FaceTarget]
     
     func makeUIView(context: Context) -> CameraPreviewUIView {
         let view = CameraPreviewUIView()
@@ -165,15 +211,6 @@ struct CameraPreviewViewRepresentable: UIViewRepresentable {
         previewLayer.videoGravity = .resizeAspectFill
         previewLayer.frame = UIScreen.main.bounds
         view.layer.addSublayer(previewLayer)
-        
-        let faceLayer = CAShapeLayer()
-        faceLayer.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 1).cgColor
-        faceLayer.fillColor = UIColor.clear.cgColor
-        faceLayer.lineWidth = 2.0
-        view.layer.addSublayer(faceLayer)
-        
-        view.faceLayer = faceLayer
-        view.previewLayer = previewLayer
         
         return view
     }
@@ -200,39 +237,103 @@ struct CameraPreviewViewRepresentable: UIViewRepresentable {
                 }
             }
             
-            uiView.updateFaceRects(detectedFaces)
+            uiView.updateFaces(detectedFaces, bounds: uiView.bounds)
         }
     }
 }
 
 class CameraPreviewUIView: UIView {
-    var previewLayer: AVCaptureVideoPreviewLayer?
-    var faceLayer: CAShapeLayer?
+    private var faceLayers: [CAShapeLayer] = []
+    private var cornerLayers: [CAShapeLayer] = []
     
-    func updateFaceRects(_ faceRects: [CGRect]) {
-        guard let faceLayer = faceLayer else { return }
+    func updateFaces(_ faces: [FaceTarget], bounds: CGRect) {
+        faceLayers.forEach { $0.removeFromSuperlayer() }
+        cornerLayers.forEach { $0.removeFromSuperlayer() }
+        faceLayers.removeAll()
+        cornerLayers.removeAll()
         
-        let path = UIBezierPath()
-        
-        for faceRect in faceRects {
-            let x = faceRect.minX * bounds.width
-            let y = (1 - faceRect.maxY) * bounds.height
-            let width = faceRect.width * bounds.width
-            let height = faceRect.height * bounds.height
+        for face in faces {
+            let x = face.rect.minX * bounds.width
+            let y = (1 - face.rect.maxY) * bounds.height
+            let width = face.rect.width * bounds.width
+            let height = face.rect.height * bounds.height
             
             let centerX = x + width / 2
             let centerY = y + height / 2
-            let radius = max(width, height) / 2
+            let size = max(width, height)
             
-            let circlePath = UIBezierPath(arcCenter: CGPoint(x: centerX, y: centerY),
-                                          radius: radius,
-                                          startAngle: 0,
-                                          endAngle: .pi * 2,
-                                          clockwise: true)
-            path.append(circlePath)
+            let outerRadius = size / 2 + 10
+            let innerRadius = size / 2 - 5
+            
+            let outerCircle = CAShapeLayer()
+            outerCircle.path = UIBezierPath(arcCenter: CGPoint(x: centerX, y: centerY),
+                                            radius: outerRadius,
+                                            startAngle: 0,
+                                            endAngle: .pi * 2,
+                                            clockwise: true).cgPath
+            outerCircle.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 1).cgColor
+            outerCircle.fillColor = UIColor.clear.cgColor
+            outerCircle.lineWidth = 1
+            outerCircle.lineDashPattern = [5, 5]
+            layer.addSublayer(outerCircle)
+            faceLayers.append(outerCircle)
+            
+            let innerCircle = CAShapeLayer()
+            innerCircle.path = UIBezierPath(arcCenter: CGPoint(x: centerX, y: centerY),
+                                            radius: innerRadius,
+                                            startAngle: 0,
+                                            endAngle: .pi * 2,
+                                            clockwise: true).cgPath
+            innerCircle.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 1).cgColor
+            innerCircle.fillColor = UIColor.clear.cgColor
+            innerCircle.lineWidth = 2
+            layer.addSublayer(innerCircle)
+            faceLayers.append(innerCircle)
+            
+            let cornerSize: CGFloat = 15
+            let corners: [(CGPoint, CGFloat)] = [
+                (CGPoint(x: centerX - innerRadius, y: centerY - innerRadius), 0),
+                (CGPoint(x: centerX + innerRadius, y: centerY - innerRadius), .pi / 2),
+                (CGPoint(x: centerX + innerRadius, y: centerY + innerRadius), .pi),
+                (CGPoint(x: centerX - innerRadius, y: centerY + innerRadius), .pi * 1.5)
+            ]
+            
+            for (corner, startAngle) in corners {
+                let cornerLayer = CAShapeLayer()
+                let path = UIBezierPath()
+                path.move(to: CGPoint(x: corner.x + cos(startAngle) * cornerSize,
+                                      y: corner.y + sin(startAngle) * cornerSize))
+                path.addLine(to: corner)
+                path.addLine(to: CGPoint(x: corner.x + cos(startAngle + .pi / 2) * cornerSize,
+                                         y: corner.y + sin(startAngle + .pi / 2) * cornerSize))
+                cornerLayer.path = path.cgPath
+                cornerLayer.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 1).cgColor
+                cornerLayer.fillColor = UIColor.clear.cgColor
+                cornerLayer.lineWidth = 2
+                layer.addSublayer(cornerLayer)
+                cornerLayers.append(cornerLayer)
+            }
+            
+            let lineLength: CGFloat = 30
+            let crosshairOffsets: [(CGFloat, CGFloat)] = [
+                (0, -innerRadius - lineLength),
+                (0, innerRadius + lineLength),
+                (-innerRadius - lineLength, 0),
+                (innerRadius + lineLength, 0)
+            ]
+            
+            for (dx, dy) in crosshairOffsets {
+                let lineLayer = CAShapeLayer()
+                let path = UIBezierPath()
+                path.move(to: CGPoint(x: centerX, y: centerY))
+                path.addLine(to: CGPoint(x: centerX + dx, y: centerY + dy))
+                lineLayer.path = path.cgPath
+                lineLayer.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 0.7).cgColor
+                lineLayer.lineWidth = 1
+                layer.addSublayer(lineLayer)
+                cornerLayers.append(lineLayer)
+            }
         }
-        
-        faceLayer.path = path.cgPath
     }
 }
 
@@ -266,13 +367,32 @@ struct IronManHUD: View {
                 Spacer()
                 
                 if faceCount > 0 {
-                    Text("TARGETS: \(faceCount)")
-                        .font(.system(size: 14, weight: .bold, design: .monospaced))
-                        .foregroundColor(Color(red: 1.0, green: 0.2, blue: 0.2))
-                        .shadow(color: Color(red: 1.0, green: 0.0, blue: 0.0), radius: 5)
+                    TargetCounter(count: faceCount)
                         .padding(.trailing, 20)
                         .padding(.bottom, 20)
                 }
+            }
+        }
+    }
+}
+
+struct TargetCounter: View {
+    let count: Int
+    @State private var pulse = false
+    
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "scope")
+                .font(.system(size: 14))
+            Text("TARGETS: \(count)")
+                .font(.system(size: 14, weight: .bold, design: .monospaced))
+        }
+        .foregroundColor(.red)
+        .shadow(color: .red, radius: pulse ? 10 : 5)
+        .scaleEffect(pulse ? 1.05 : 1.0)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
+                pulse = true
             }
         }
     }
