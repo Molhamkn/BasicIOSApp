@@ -1,14 +1,16 @@
 import SwiftUI
 import AVFoundation
+import Vision
 
 struct CameraContainerView: View {
     @StateObject private var cameraManager = CameraManager()
     @State private var showCameraSwitcher = false
     @State private var baseZoom: CGFloat = 1.0
+    @State private var detectedFaces: [CGRect] = []
     
     var body: some View {
         ZStack {
-            CameraPreviewViewRepresentable(cameraManager: cameraManager)
+            CameraPreviewViewRepresentable(cameraManager: cameraManager, detectedFaces: detectedFaces)
                 .ignoresSafeArea()
                 .gesture(
                     MagnificationGesture()
@@ -24,10 +26,16 @@ struct CameraContainerView: View {
             IronManHUD(
                 currentZoom: cameraManager.zoom,
                 showCameraSwitcher: $showCameraSwitcher,
-                cameraManager: cameraManager
+                cameraManager: cameraManager,
+                faceCount: detectedFaces.count
             )
         }
         .onAppear {
+            cameraManager.onFacesDetected = { faces in
+                DispatchQueue.main.async {
+                    detectedFaces = faces
+                }
+            }
             cameraManager.setup()
         }
     }
@@ -40,6 +48,10 @@ class CameraManager: NSObject, ObservableObject {
     
     let captureSession = AVCaptureSession()
     var currentInput: AVCaptureDeviceInput?
+    var videoOutput: AVCaptureVideoDataOutput?
+    var onFacesDetected: (([CGRect]) -> Void)?
+    
+    private let sequenceHandler = VNSequenceRequestHandler()
     
     func setup() {
         setupCamera(position: .back)
@@ -48,6 +60,10 @@ class CameraManager: NSObject, ObservableObject {
     func setupCamera(position: AVCaptureDevice.Position) {
         captureSession.beginConfiguration()
         captureSession.inputs.forEach { captureSession.removeInput($0) }
+        
+        if let videoOutput = videoOutput {
+            captureSession.removeOutput(videoOutput)
+        }
         
         guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
               let input = try? AVCaptureDeviceInput(device: camera) else {
@@ -58,6 +74,13 @@ class CameraManager: NSObject, ObservableObject {
         if captureSession.canAddInput(input) {
             captureSession.addInput(input)
             currentInput = input
+        }
+        
+        let output = AVCaptureVideoDataOutput()
+        output.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
+        if captureSession.canAddOutput(output) {
+            captureSession.addOutput(output)
+            videoOutput = output
         }
         
         captureSession.commitConfiguration()
@@ -108,13 +131,34 @@ class CameraManager: NSObject, ObservableObject {
             } catch {}
         }
     }
+    
+    private func detectFaces(in pixelBuffer: CVPixelBuffer) {
+        let request = VNDetectFaceRectanglesRequest { [weak self] request, error in
+            guard error == nil else { return }
+            
+            guard let results = request.results as? [VNFaceObservation] else { return }
+            
+            let faceRects = results.map { $0.boundingBox }
+            self?.onFacesDetected?(faceRects)
+        }
+        
+        try? sequenceHandler.perform([request], on: pixelBuffer)
+    }
+}
+
+extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        detectFaces(in: pixelBuffer)
+    }
 }
 
 struct CameraPreviewViewRepresentable: UIViewRepresentable {
     @ObservedObject var cameraManager: CameraManager
+    var detectedFaces: [CGRect]
     
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
+    func makeUIView(context: Context) -> CameraPreviewUIView {
+        let view = CameraPreviewUIView()
         view.backgroundColor = .black
         
         let previewLayer = AVCaptureVideoPreviewLayer(session: cameraManager.captureSession)
@@ -122,12 +166,22 @@ struct CameraPreviewViewRepresentable: UIViewRepresentable {
         previewLayer.frame = UIScreen.main.bounds
         view.layer.addSublayer(previewLayer)
         
+        let faceLayer = CAShapeLayer()
+        faceLayer.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 1).cgColor
+        faceLayer.fillColor = UIColor.clear.cgColor
+        faceLayer.lineWidth = 2.0
+        view.layer.addSublayer(faceLayer)
+        
+        view.faceLayer = faceLayer
+        view.previewLayer = previewLayer
+        
         return view
     }
     
-    func updateUIView(_ uiView: UIView, context: Context) {
+    func updateUIView(_ uiView: CameraPreviewUIView, context: Context) {
         DispatchQueue.main.async {
             uiView.layer.sublayers?.first?.frame = uiView.bounds
+            
             if let previewLayer = uiView.layer.sublayers?.first as? AVCaptureVideoPreviewLayer,
                let connection = previewLayer.connection {
                 let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene
@@ -145,7 +199,40 @@ struct CameraPreviewViewRepresentable: UIViewRepresentable {
                     connection.videoOrientation = .portrait
                 }
             }
+            
+            uiView.updateFaceRects(detectedFaces)
         }
+    }
+}
+
+class CameraPreviewUIView: UIView {
+    var previewLayer: AVCaptureVideoPreviewLayer?
+    var faceLayer: CAShapeLayer?
+    
+    func updateFaceRects(_ faceRects: [CGRect]) {
+        guard let faceLayer = faceLayer else { return }
+        
+        let path = UIBezierPath()
+        
+        for faceRect in faceRects {
+            let x = faceRect.minX * bounds.width
+            let y = (1 - faceRect.maxY) * bounds.height
+            let width = faceRect.width * bounds.width
+            let height = faceRect.height * bounds.height
+            
+            let centerX = x + width / 2
+            let centerY = y + height / 2
+            let radius = max(width, height) / 2
+            
+            let circlePath = UIBezierPath(arcCenter: CGPoint(x: centerX, y: centerY),
+                                          radius: radius,
+                                          startAngle: 0,
+                                          endAngle: .pi * 2,
+                                          clockwise: true)
+            path.append(circlePath)
+        }
+        
+        faceLayer.path = path.cgPath
     }
 }
 
@@ -153,6 +240,7 @@ struct IronManHUD: View {
     let currentZoom: CGFloat
     @Binding var showCameraSwitcher: Bool
     let cameraManager: CameraManager
+    var faceCount: Int = 0
     
     var body: some View {
         VStack {
@@ -177,8 +265,11 @@ struct IronManHUD: View {
                 
                 Spacer()
                 
-                if showCameraSwitcher {
-                    CameraSwitchMenu(isFront: false)
+                if faceCount > 0 {
+                    Text("TARGETS: \(faceCount)")
+                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(red: 1.0, green: 0.2, blue: 0.2))
+                        .shadow(color: Color(red: 1.0, green: 0.0, blue: 0.0), radius: 5)
                         .padding(.trailing, 20)
                         .padding(.bottom, 20)
                 }
@@ -234,18 +325,6 @@ struct CameraSwitchButton: View {
                 .shadow(color: Color(red: 0.0, green: 0.5, blue: 1.0), radius: 5)
                 .frame(width: 50, height: 50)
         }
-    }
-}
-
-struct CameraSwitchMenu: View {
-    let isFront: Bool
-    
-    var body: some View {
-        Text("Camera switch placeholder")
-            .font(.system(size: 14, weight: .bold, design: .monospaced))
-            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
-            .padding()
-            .background(Color.black.opacity(0.5))
     }
 }
 
