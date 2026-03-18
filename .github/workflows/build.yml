@@ -18,10 +18,8 @@ jobs:
     
     - name: Generate Xcode Project
       run: |
-        cd BasicIOSApp
         xcodegen generate
     
     - name: Build
       run: |
-        cd BasicIOSApp
         xcodebuild -project BasicIOSApp.xcodeproj -scheme BasicIOSApp -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 16' build
