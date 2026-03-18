@@ -171,24 +171,14 @@ class CameraManager: NSObject, ObservableObject {
             
             try? handler.perform([detectRequest], on: pixelBuffer)
         } else if isTracking && !trackedObservations.isEmpty {
-            let trackRequest = VNTrackRectanglesRequest { [weak self] request, error in
-                guard error == nil else {
-                    self?.isTracking = false
-                    return
-                }
-                guard let results = request.results as? [VNDetectedObjectObservation] else {
-                    return
-                }
-                
-                if !results.isEmpty {
-                    self?.trackedObservations = results
-                } else {
-                    self?.isTracking = false
-                }
-            }
-            
-            trackRequest.lastFrame = trackedObservations.first
+            let trackRequest = VNTrackObjectRequest(detectedObjectObservation: trackedObservations.first!)
             try? handler.perform([trackRequest], on: pixelBuffer)
+            
+            if let result = trackRequest.results?.first as? VNDetectedObjectObservation {
+                trackedObservations = [result]
+            } else {
+                isTracking = false
+            }
         }
         
         let rects = trackedObservations.map { $0.boundingBox }
@@ -242,7 +232,7 @@ struct CameraPreviewViewRepresentable: UIViewRepresentable {
                 }
             }
             
-            uiView.updateFaces(detectedFaces, bounds: uiView.bounds)
+            (uiView as? CameraPreviewUIView)?.updateFaces(detectedFaces, bounds: uiView.bounds)
         }
     }
 }
