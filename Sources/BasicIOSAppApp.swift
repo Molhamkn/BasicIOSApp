@@ -174,37 +174,6 @@ class CameraManager: NSObject, ObservableObject {
             guard let results = request.results as? [VNFaceObservation] else { return }
             
             let faceRects = results.map { observation -> CGRect in
-                if let landmarks = observation.landmarks {
-                    let allPoints = landmarks.allPoints
-                    let normalizedPoints = allPoints.normalizedPoints
-                    
-                    if !normalizedPoints.isEmpty {
-                        var minX: CGFloat = 1.0
-                        var maxX: CGFloat = 0.0
-                        var minY: CGFloat = 1.0
-                        var maxY: CGFloat = 0.0
-                        
-                        for point in normalizedPoints {
-                            minX = min(minX, point.x)
-                            maxX = max(maxX, point.x)
-                            minY = min(minY, point.y)
-                            maxY = max(maxY, point.y)
-                        }
-                        
-                        let padding: CGFloat = 0.1
-                        let centerX = observation.boundingBox.midX
-                        let centerY = observation.boundingBox.midY
-                        let width = observation.boundingBox.width
-                        let height = observation.boundingBox.height
-                        
-                        return CGRect(
-                            x: centerX - width * (0.5 + padding),
-                            y: centerY - height * (0.5 + padding),
-                            width: width * (1 + padding * 2),
-                            height: height * (1 + padding * 2)
-                        )
-                    }
-                }
                 return observation.boundingBox
             }
             
