@@ -321,7 +321,7 @@ struct TrainingModeView: View {
             }
             .padding()
             
-            if !capturedImages.isEmpty {
+            if !capturedImages.isEmpty && !newPersonName.isEmpty {
                 Text("\(capturedImages.count) photos selected")
                     .foregroundColor(.green)
                 
@@ -334,10 +334,10 @@ struct TrainingModeView: View {
                     }
                 }
                 .padding()
-                .background(trainedPeople.isEmpty ? Color.gray : Color.green)
+                .background(Color.green)
                 .foregroundColor(.white)
                 .cornerRadius(10)
-                .disabled(isTraining || trainedPeople.isEmpty)
+                .disabled(isTraining)
             }
             
             if trainingComplete {
