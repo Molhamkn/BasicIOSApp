@@ -11,6 +11,7 @@ struct CameraContainerView: View {
     @State private var detectedFaces: [FaceTarget] = []
     @State private var showTrainingMode = false
     @State private var showSettings = false
+    @State private var showChat = false
     
     var body: some View {
         ZStack {
@@ -33,7 +34,8 @@ struct CameraContainerView: View {
                 cameraManager: cameraManager,
                 faceCount: detectedFaces.count,
                 showTrainingMode: $showTrainingMode,
-                showSettings: $showSettings
+                showSettings: $showSettings,
+                showChat: $showChat
             )
             
             if showTrainingMode {
@@ -42,6 +44,10 @@ struct CameraContainerView: View {
             
             if showSettings {
                 SettingsView(showSettings: $showSettings)
+            }
+            
+            if showChat {
+                ChatView(showChat: $showChat)
             }
         }
         .onAppear {
@@ -1056,6 +1062,7 @@ struct IronManHUD: View {
     var faceCount: Int = 0
     var showTrainingMode: Binding<Bool>? = nil
     var showSettings: Binding<Bool>? = nil
+    var showChat: Binding<Bool>? = nil
     
     var body: some View {
         VStack {
@@ -1069,6 +1076,15 @@ struct IronManHUD: View {
                 ZoomIndicator(zoom: currentZoom)
                     .padding(.trailing, 20)
                     .padding(.top, 20)
+                
+                if let chatBinding = showChat {
+                    Button(action: { chatBinding.wrappedValue.toggle() }) {
+                        Image(systemName: "message.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                            .padding(.trailing, 10)
+                    }
+                }
                 
                 if let settingsBinding = showSettings {
                     Button(action: { settingsBinding.wrappedValue.toggle() }) {
@@ -1194,6 +1210,9 @@ struct SettingsView: View {
     @State private var apiKey: String = UserDefaults.standard.string(forKey: "openrouter_api_key") ?? ""
     @State private var jarvisEnabled: Bool = UserDefaults.standard.bool(forKey: "jarvis_enabled")
     @State private var showSavedAlert = false
+    @State private var showTestImagePicker = false
+    @State private var testResult = ""
+    @State private var isTesting = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -1291,6 +1310,33 @@ struct SettingsView: View {
                     .padding()
                     .background(Color.white.opacity(0.05))
                     .cornerRadius(10)
+                    
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("TEST AI")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                        
+                        Button(action: { showTestImagePicker = true }) {
+                            HStack {
+                                Image(systemName: "photo.badge.plus")
+                                Text("Test Face Recognition")
+                            }
+                            .padding()
+                            .background(Color.orange)
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                        }
+                        
+                        if testResult != "" {
+                            Text("Result: \(testResult)")
+                                .font(.system(size: 12))
+                                .foregroundColor(.green)
+                                .padding(.top, 5)
+                        }
+                    }
+                    .padding()
+                    .background(Color.white.opacity(0.05))
+                    .cornerRadius(10)
                 }
                 .padding()
             }
@@ -1299,12 +1345,63 @@ struct SettingsView: View {
         .alert("Settings Saved", isPresented: $showSavedAlert) {
             Button("OK", role: .cancel) {}
         }
+        .sheet(isPresented: $showTestImagePicker) {
+            TestImagePicker(result: $testResult, isTesting: $isTesting)
+        }
     }
     
     func saveSettings() {
         UserDefaults.standard.set(apiKey, forKey: "openrouter_api_key")
         UserDefaults.standard.set(jarvisEnabled, forKey: "jarvis_enabled")
         showSavedAlert = true
+    }
+}
+
+struct TestImagePicker: UIViewControllerRepresentable {
+    @Binding var result: String
+    @Binding var isTesting: Bool
+    @Environment(\.presentationMode) var presentationMode
+    
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.delegate = context.coordinator
+        return picker
+    }
+    
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let parent: TestImagePicker
+        
+        init(_ parent: TestImagePicker) {
+            self.parent = parent
+        }
+        
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            parent.presentationMode.wrappedValue.dismiss()
+            
+            if let image = info[.originalImage] as? UIImage {
+                parent.isTesting = true
+                parent.result = "Analyzing..."
+                
+                let knownNames = (UserDefaults.standard.array(forKey: "trained_names") as? [String]) ?? []
+                
+                OpenRouterClient().identifyFaceWithResponse(image: image, knownNames: knownNames) { response in
+                    DispatchQueue.main.async {
+                        parent.result = response
+                        parent.isTesting = false
+                    }
+                }
+            }
+        }
+        
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.presentationMode.wrappedValue.dismiss()
+        }
     }
 }
 
@@ -1424,5 +1521,246 @@ class OpenRouterClient {
                 }
             }
         }.resume()
+    }
+    
+    func identifyFaceWithResponse(image: UIImage, knownNames: [String], completion: @escaping (String) -> Void) {
+        guard isEnabled else {
+            completion("API key not set")
+            return
+        }
+        
+        guard let imageData = image.jpegData(compressionQuality: 0.5) else {
+            completion("Failed to process image")
+            return
+        }
+        let base64Image = imageData.base64EncodedString()
+        
+        let namesList = knownNames.joined(separator: ", ")
+        let prompt = """
+        You are JARVIS, Tony Stark's AI assistant. Analyze this face image.
+        Known people: \(namesList.isEmpty ? "None yet" : namesList)
+        Describe who you see and if they match any known person.
+        """
+        
+        let requestBody: [String: Any] = [
+            "model": "anthropic/claude-3.5-haiku",
+            "messages": [
+                [
+                    "role": "user",
+                    "content": [
+                        ["type": "text", "text": prompt],
+                        ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64Image)"]]
+                    ]
+                ]
+            ],
+            "max_tokens": 200
+        ]
+        
+        guard let url = URL(string: "https://openrouter.ai/api/v1/chat/completions") else {
+            completion("Invalid URL")
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
+        request.timeoutInterval = 15
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let responseText = message["content"] as? String else {
+                DispatchQueue.main.async { completion("API error or no response") }
+                return
+            }
+            
+            DispatchQueue.main.async {
+                completion(responseText.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }.resume()
+    }
+    
+    func chat(message: String, history: [[String: String]], completion: @escaping (String) -> Void) {
+        guard isEnabled else {
+            completion("API key not set")
+            return
+        }
+        
+        var messages: [[String: Any]] = [
+            ["role": "system", "content": "You are JARVIS, Tony Stark's AI assistant. Be helpful, witty, and British. Keep responses concise."]
+        ]
+        
+        for msg in history {
+            messages.append(["role": msg["role"] ?? "user", "content": msg["content"] ?? ""])
+        }
+        
+        messages.append(["role": "user", "content": message])
+        
+        let requestBody: [String: Any] = [
+            "model": "anthropic/claude-3.5-haiku",
+            "messages": messages,
+            "max_tokens": 300
+        ]
+        
+        guard let url = URL(string: "https://openrouter.ai/api/v1/chat/completions") else {
+            completion("Invalid URL")
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
+        request.timeoutInterval = 30
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let responseText = message["content"] as? String else {
+                DispatchQueue.main.async { completion("API error") }
+                return
+            }
+            
+            DispatchQueue.main.async {
+                completion(responseText.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }.resume()
+    }
+}
+
+struct ChatView: View {
+    @Binding var showChat: Bool
+    @State private var messageText = ""
+    @State private var messages: [ChatMessage] = []
+    @State private var isLoading = false
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button(action: { showChat = false }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 24))
+                        .foregroundColor(.white)
+                        .padding()
+                }
+                Spacer()
+                Text("JARVIS")
+                    .font(.system(size: 18, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                Spacer()
+                Button(action: { messages = [] }) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 20))
+                        .foregroundColor(.red)
+                        .padding()
+                }
+            }
+            .padding(.top, 60)
+            .background(Color.black.opacity(0.95))
+            
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(messages) { msg in
+                            ChatBubble(message: msg)
+                                .id(msg.id)
+                        }
+                    }
+                    .padding()
+                }
+                .onChange(of: messages.count) { _, _ in
+                    if let lastMessage = messages.last {
+                        withAnimation {
+                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+            
+            HStack(spacing: 12) {
+                TextField("Talk to JARVIS...", text: $messageText)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .font(.system(size: 16))
+                
+                Button(action: sendMessage) {
+                    if isLoading {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                    } else {
+                        Image(systemName: "paperplane.fill")
+                            .foregroundColor(.white)
+                    }
+                }
+                .frame(width: 44, height: 44)
+                .background(messageText.isEmpty ? Color.gray : Color(red: 0.0, green: 0.8, blue: 1.0))
+                .cornerRadius(22)
+                .disabled(messageText.isEmpty || isLoading)
+            }
+            .padding()
+            .background(Color.black.opacity(0.95))
+        }
+        .background(Color.black)
+    }
+    
+    func sendMessage() {
+        let text = messageText
+        messageText = ""
+        
+        let userMessage = ChatMessage(role: "user", content: text)
+        messages.append(userMessage)
+        
+        isLoading = true
+        
+        let history = messages.dropLast().map { ["role": $0.role, "content": $0.content] }
+        
+        OpenRouterClient().chat(message: text, history: Array(history)) { response in
+            isLoading = false
+            let jarvisMessage = ChatMessage(role: "assistant", content: response)
+            messages.append(jarvisMessage)
+            
+            if UserDefaults.standard.bool(forKey: "jarvis_enabled") {
+                Jarvis.shared.speak(response)
+            }
+        }
+    }
+}
+
+struct ChatMessage: Identifiable {
+    let id = UUID()
+    let role: String
+    let content: String
+}
+
+struct ChatBubble: View {
+    let message: ChatMessage
+    
+    var body: some View {
+        HStack {
+            if message.role == "assistant" {
+                Image(systemName: "brain.head.profile")
+                    .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                Text("JARVIS")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+            }
+            
+            Text(message.content)
+                .font(.system(size: 14))
+                .foregroundColor(message.role == "user" ? .white : .white)
+                .padding(12)
+                .background(message.role == "user" ? Color(red: 0.0, green: 0.6, blue: 0.8) : Color.white.opacity(0.1))
+                .cornerRadius(16)
+            
+            if message.role == "user" {
+                Spacer()
+            }
+        }
     }
 }
