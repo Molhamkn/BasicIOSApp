@@ -1529,7 +1529,7 @@ class OpenRouterClient {
             return
         }
         
-        guard let imageData = image.jpegData(compressionQuality: 0.5) else {
+        guard let imageData = image.jpegData(compressionQuality: 0.3) else {
             completion("Failed to process image")
             return
         }
@@ -1539,19 +1539,28 @@ class OpenRouterClient {
         let prompt = """
         You are JARVIS, Tony Stark's AI assistant. Analyze this face image.
         Known people: \(namesList.isEmpty ? "None yet" : namesList)
-        Describe who you see and if they match any known person.
+        Describe who you see and if they match any known person. Be brief.
         """
+        
+        let contentArray: [[String: Any]] = [
+            ["type": "text", "text": prompt]
+        ]
+        
+        let imageContent: [String: Any] = [
+            "type": "image_url",
+            "image_url": ["url": "data:image/jpeg;base64,\(base64Image)"]
+        ]
         
         let requestBody: [String: Any] = [
             "model": "anthropic/claude-3.5-haiku",
             "messages": [
                 [
                     "role": "user",
-                    "content": [
-                        ["type": "text", "text": prompt],
-                        ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64Image)"]]
-                    ]
+                    "content": [imageContent, ["type": "text", "text": prompt]]
                 ]
+            ],
+            "max_tokens": 200
+        ]
             ],
             "max_tokens": 200
         ]
@@ -1569,12 +1578,34 @@ class OpenRouterClient {
         request.timeoutInterval = 15
         
         URLSession.shared.dataTask(with: request) { data, response, error in
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
+            if let error = error {
+                DispatchQueue.main.async { completion("Network error: \(error.localizedDescription)") }
+                return
+            }
+            
+            guard let data = data else {
+                DispatchQueue.main.async { completion("No data received") }
+                return
+            }
+            
+            if let responseString = String(data: data, encoding: .utf8) {
+                print("API Response: \(responseString.prefix(500))")
+            }
+            
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                DispatchQueue.main.async { completion("Invalid JSON response") }
+                return
+            }
+            
+            if let errorMsg = json["error"] as? [String: Any], let message = errorMsg["message"] as? String {
+                DispatchQueue.main.async { completion("API Error: \(message)") }
+                return
+            }
+            
+            guard let choices = json["choices"] as? [[String: Any]],
                   let message = choices.first?["message"] as? [String: Any],
                   let responseText = message["content"] as? String else {
-                DispatchQueue.main.async { completion("API error or no response") }
+                DispatchQueue.main.async { completion("Invalid response format") }
                 return
             }
             
