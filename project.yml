@@ -15,6 +15,7 @@ targets:
       - Resources
     dependencies:
       - package: SQLite.swift
+        product: SQLite
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.BasicIOSApp
