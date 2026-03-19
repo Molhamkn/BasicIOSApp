@@ -492,6 +492,7 @@ struct ImagePicker: UIViewControllerRepresentable {
                     if let image = object as? UIImage {
                         DispatchQueue.main.async {
                             self.parent.images.append(image)
+                        }
                     }
                 }
             }
