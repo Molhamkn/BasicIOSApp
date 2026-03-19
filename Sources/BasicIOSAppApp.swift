@@ -1392,8 +1392,8 @@ struct TestImagePicker: UIViewControllerRepresentable {
                 
                 OpenRouterClient().identifyFaceWithResponse(image: image, knownNames: knownNames) { response in
                     DispatchQueue.main.async {
-                        parent.result = response
-                        parent.isTesting = false
+                        self.parent.result = response
+                        self.parent.isTesting = false
                     }
                 }
             }
@@ -1675,7 +1675,7 @@ struct ChatView: View {
                     }
                     .padding()
                 }
-                .onChange(of: messages.count) { _, _ in
+                .onChange(of: messages.count) { _ in
                     if let lastMessage = messages.last {
                         withAnimation {
                             proxy.scrollTo(lastMessage.id, anchor: .bottom)
