@@ -530,6 +530,22 @@ class FaceClassifier {
         return Array(features.prefix(128))
     }
     
+    func recognize(cgImage: CGImage) -> String? {
+        let features = extractFeatures(from: cgImage)
+        guard !features.isEmpty else { return nil }
+        
+        var bestMatch: (name: String, similarity: Float) = ("", 0)
+        
+        for embedding in embeddings {
+            let similarity = cosineSimilarity(features, embedding.features)
+            if similarity > minMatchConfidence && similarity > bestMatch.similarity {
+                bestMatch = (embedding.name, similarity)
+            }
+        }
+        
+        return bestMatch.similarity > minMatchConfidence ? bestMatch.name : nil
+    }
+    
     private func createCGImage(from pixelBuffer: CVPixelBuffer, cropRect: CGRect) -> CGImage? {
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer).cropped(to: cropRect)
         let context = CIContext()
@@ -1386,11 +1402,27 @@ struct TestImagePicker: UIViewControllerRepresentable {
             
             if let image = info[.originalImage] as? UIImage {
                 parent.isTesting = true
-                parent.result = "Analyzing..."
+                parent.result = "Scanning face..."
                 
-                let knownNames = (UserDefaults.standard.array(forKey: "trained_names") as? [String]) ?? []
+                if let cgImage = image.cgImage {
+                    let request = VNDetectFaceRectanglesRequest()
+                    let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+                    try? handler.perform([request])
+                    
+                    if let observation = request.results?.first {
+                        let classifier = FaceClassifier()
+                        classifier.load()
+                        
+                        if let name = classifier.recognize(cgImage: cgImage) {
+                            parent.result = "Hi \(name)! 👋"
+                            Jarvis.shared.speak("Hello, \(name)")
+                            parent.isTesting = false
+                            return
+                        }
+                    }
+                }
                 
-                OpenRouterClient().identifyFaceWithResponse(image: image, knownNames: knownNames) { response in
+                OpenRouterClient().identifyFaceWithResponse(image: image, knownNames: []) { response in
                     DispatchQueue.main.async {
                         self.parent.result = response
                         self.parent.isTesting = false
