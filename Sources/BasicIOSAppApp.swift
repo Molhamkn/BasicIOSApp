@@ -81,18 +81,16 @@ struct CameraContainerView: View {
         
         let screenRecorder = ScreenRecorder.shared
         
-        screenRecorder.startCapture { [weak self] image in
-            guard let self = self else { return }
+        screenRecorder.startCapture { image in
+            self.isAnalyzingScreen = false
             
             guard let capturedImage = image else {
-                self.isAnalyzingScreen = false
                 self.screenAnalysisText = "Could not capture screen. Make sure screen recording permission is enabled in Settings."
                 self.showScreenAnalysisResult = true
                 return
             }
             
             guard let imageData = capturedImage.jpegData(compressionQuality: 0.5) else {
-                self.isAnalyzingScreen = false
                 self.screenAnalysisText = "Could not process image"
                 self.showScreenAnalysisResult = true
                 return
@@ -117,6 +115,8 @@ struct CameraContainerView: View {
     }
     
     func sendAnalysisRequest(body: [String: Any]) {
+        isAnalyzingScreen = true
+        
         guard let url = URL(string: "https://openrouter.ai/api/v1/chat/completions") else {
             isAnalyzingScreen = false
             screenAnalysisText = "Invalid URL"
@@ -130,7 +130,7 @@ struct CameraContainerView: View {
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = 30
         
         URLSession.shared.dataTask(with: request) { data, response, error in
