@@ -10,6 +10,7 @@ struct CameraContainerView: View {
     @State private var baseZoom: CGFloat = 1.0
     @State private var detectedFaces: [FaceTarget] = []
     @State private var showTrainingMode = false
+    @State private var showSettings = false
     
     var body: some View {
         ZStack {
@@ -31,11 +32,16 @@ struct CameraContainerView: View {
                 showCameraSwitcher: $showCameraSwitcher,
                 cameraManager: cameraManager,
                 faceCount: detectedFaces.count,
-                showTrainingMode: $showTrainingMode
+                showTrainingMode: $showTrainingMode,
+                showSettings: $showSettings
             )
             
             if showTrainingMode {
                 TrainingModeView(cameraManager: cameraManager, showTrainingMode: $showTrainingMode)
+            }
+            
+            if showSettings {
+                SettingsView(showSettings: $showSettings)
             }
         }
         .onAppear {
@@ -72,6 +78,11 @@ class CameraManager: NSObject, ObservableObject {
     private var nextFaceId = 0
     private var frameCount = 0
     private let detectEveryNFrames = 1
+    
+    private var openRouterClient = OpenRouterClient()
+    private var lastApiCall: Date = .distantPast
+    private let apiCooldown: TimeInterval = 5.0
+    private var lastRecognizedNames: Set<String> = []
     
     var faceClassifier: FaceClassifier?
     
@@ -188,6 +199,9 @@ class CameraManager: NSObject, ObservableObject {
                 }
                 
                 nextFaceId = (trackedFaces.map { $0.id }.max() ?? 0) + 1
+                
+                // Call OpenRouter for better recognition
+                callOpenRouterForRecognition(pixelBuffer: pixelBuffer)
             } else {
                 trackedFaces = []
             }
@@ -200,6 +214,34 @@ class CameraManager: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.onFacesDetected?(faceTargets)
         }
+    }
+    
+    private func callOpenRouterForRecognition(pixelBuffer: CVPixelBuffer) {
+        guard Date().timeIntervalSince(lastApiCall) > apiCooldown else { return }
+        guard !trackedFaces.isEmpty else { return }
+        
+        lastApiCall = Date()
+        
+        let knownNames = faceClassifier?.getTrainedNames() ?? []
+        
+        guard let cgImage = createCGImage(from: pixelBuffer) else { return }
+        let image = UIImage(cgImage: cgImage)
+        
+        openRouterClient.identifyFace(image: image, knownNames: knownNames) { [weak self] identifiedName in
+            guard let name = identifiedName else { return }
+            
+            // Update the tracked face with the name from OpenRouter
+            if let index = self?.trackedFaces.firstIndex(where: { $0.name == nil || $0.name?.isEmpty == true }) {
+                self?.trackedFaces[index].name = name
+                Jarvis.shared.announceFaceRecognized(name: name)
+            }
+        }
+    }
+    
+    private func createCGImage(from pixelBuffer: CVPixelBuffer) -> CGImage? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+        return context.createCGImage(ciImage, from: ciImage.extent)
     }
     
     private func matchFaces(oldFaces: [(id: Int, observation: VNFaceObservation, name: String?)], newRects: [CGRect]) -> [(id: Int, newIndex: Int)] {
@@ -1013,6 +1055,7 @@ struct IronManHUD: View {
     let cameraManager: CameraManager
     var faceCount: Int = 0
     var showTrainingMode: Binding<Bool>? = nil
+    var showSettings: Binding<Bool>? = nil
     
     var body: some View {
         VStack {
@@ -1026,6 +1069,15 @@ struct IronManHUD: View {
                 ZoomIndicator(zoom: currentZoom)
                     .padding(.trailing, 20)
                     .padding(.top, 20)
+                
+                if let settingsBinding = showSettings {
+                    Button(action: { settingsBinding.wrappedValue.toggle() }) {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 20))
+                            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                            .padding(.trailing, 10)
+                    }
+                }
                 
                 if let trainingBinding = showTrainingMode {
                     Button(action: { trainingBinding.wrappedValue.toggle() }) {
@@ -1134,5 +1186,243 @@ struct BasicIOSAppApp: App {
         WindowGroup {
             CameraContainerView()
         }
+    }
+}
+
+struct SettingsView: View {
+    @Binding var showSettings: Bool
+    @State private var apiKey: String = UserDefaults.standard.string(forKey: "openrouter_api_key") ?? ""
+    @State private var jarvisEnabled: Bool = UserDefaults.standard.bool(forKey: "jarvis_enabled")
+    @State private var showSavedAlert = false
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button(action: { showSettings = false }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 24))
+                        .foregroundColor(.white)
+                        .padding()
+                }
+                Spacer()
+                Text("SETTINGS")
+                    .font(.system(size: 18, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                Spacer()
+                Button(action: saveSettings) {
+                    Text("SAVE")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.green)
+                        .padding()
+                }
+            }
+            .padding(.top, 60)
+            .background(Color.black.opacity(0.95))
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("OPENROUTER API KEY")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                        
+                        SecureField("sk-or-...", text: $apiKey)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .font(.system(size: 14))
+                    }
+                    .padding()
+                    .background(Color.white.opacity(0.05))
+                    .cornerRadius(10)
+                    
+                    Toggle(isOn: $jarvisEnabled) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("JARVIS VOICE")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.white)
+                            Text("Voice responses when faces are recognized")
+                                .font(.system(size: 12))
+                                .foregroundColor(.gray)
+                        }
+                    }
+                    .padding()
+                    .background(Color.white.opacity(0.05))
+                    .cornerRadius(10)
+                    
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("JARVIS SETTINGS")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                        
+                        Button(action: { Jarvis.shared.speak("Jarvis online, sir") }) {
+                            HStack {
+                                Image(systemName: "speaker.wave.2")
+                                Text("Test Voice")
+                            }
+                            .padding()
+                            .background(Color(red: 0.0, green: 0.6, blue: 0.8))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                        }
+                        
+                        Button(action: { Jarvis.shared.stop() }) {
+                            HStack {
+                                Image(systemName: "stop.fill")
+                                Text("Stop")
+                            }
+                            .padding()
+                            .background(Color.red.opacity(0.7))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                        }
+                    }
+                    .padding()
+                    .background(Color.white.opacity(0.05))
+                    .cornerRadius(10)
+                    
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("MODEL")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                        
+                        Text("Using: anthropic/claude-3.5-haiku")
+                            .font(.system(size: 14))
+                            .foregroundColor(.gray)
+                    }
+                    .padding()
+                    .background(Color.white.opacity(0.05))
+                    .cornerRadius(10)
+                }
+                .padding()
+            }
+        }
+        .background(Color.black.opacity(0.95))
+        .alert("Settings Saved", isPresented: $showSavedAlert) {
+            Button("OK", role: .cancel) {}
+        }
+    }
+    
+    func saveSettings() {
+        UserDefaults.standard.set(apiKey, forKey: "openrouter_api_key")
+        UserDefaults.standard.set(jarvisEnabled, forKey: "jarvis_enabled")
+        showSavedAlert = true
+    }
+}
+
+class Jarvis: ObservableObject {
+    static let shared = Jarvis()
+    
+    private let synthesizer = AVSpeechSynthesizer()
+    private var lastSpokenTime: Date = .distantPast
+    private let cooldown: TimeInterval = 3.0
+    
+    private init() {}
+    
+    func speak(_ text: String) {
+        guard UserDefaults.standard.bool(forKey: "jarvis_enabled") else { return }
+        guard Date().timeIntervalSince(lastSpokenTime) > cooldown else { return }
+        
+        lastSpokenTime = Date()
+        
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-GB")
+        utterance.rate = 0.52
+        utterance.pitchMultiplier = 1.0
+        utterance.volume = 1.0
+        
+        synthesizer.speak(utterance)
+    }
+    
+    func announceFaceRecognized(name: String) {
+        speak("Hello, \(name)")
+    }
+    
+    func announceTargetAcquired() {
+        speak("Target acquired")
+    }
+    
+    func announceNewFace() {
+        speak("Unknown contact detected")
+    }
+    
+    func stop() {
+        synthesizer.stopSpeaking(at: .immediate)
+    }
+}
+
+class OpenRouterClient {
+    private var apiKey: String {
+        UserDefaults.standard.string(forKey: "openrouter_api_key") ?? ""
+    }
+    
+    private var isEnabled: Bool {
+        !apiKey.isEmpty
+    }
+    
+    func identifyFace(image: UIImage, knownNames: [String], completion: @escaping (String?) -> Void) {
+        guard isEnabled else {
+            completion(nil)
+            return
+        }
+        
+        guard let imageData = image.jpegData(compressionQuality: 0.5) else {
+            completion(nil)
+            return
+        }
+        let base64Image = imageData.base64EncodedString()
+        
+        let namesList = knownNames.joined(separator: ", ")
+        let prompt = """
+        You are JARVIS, Tony Stark's AI assistant. Identify the person in this image.
+        Known people: \(namesList.isEmpty ? "None" : namesList)
+        Respond ONLY with the person's name if recognized, or "Unknown" if not recognized.
+        Be brief and precise.
+        """
+        
+        let requestBody: [String: Any] = [
+            "model": "anthropic/claude-3.5-haiku",
+            "messages": [
+                [
+                    "role": "user",
+                    "content": [
+                        ["type": "text", "text": prompt],
+                        ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64Image)"]
+                        ]
+                    ]
+                ]
+            ],
+            "max_tokens": 50
+        ]
+        
+        guard let url = URL(string: "https://openrouter.ai/api/v1/chat/completions") else {
+            completion(nil)
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
+        request.timeoutInterval = 10
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let responseText = message["content"] as? String else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            
+            let name = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                if name.lowercased() != "unknown" && knownNames.contains(where: { name.lowercased().contains($0.lowercased()) }) {
+                    completion(knownNames.first { name.lowercased().contains($0.lowercased()) })
+                } else {
+                    completion(nil)
+                }
+            }
+        }.resume()
     }
 }
