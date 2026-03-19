@@ -213,6 +213,7 @@ class CameraManager: NSObject, ObservableObject {
     private var lastApiCall: Date = .distantPast
     private let apiCooldown: TimeInterval = 5.0
     private var lastRecognizedNames: Set<String> = []
+    var latestPixelBuffer: CVPixelBuffer?
     
     var faceClassifier: FaceClassifier?
     
@@ -304,10 +305,7 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     func captureCurrentFrame() -> UIImage? {
-        guard let output = videoOutput else { return nil }
-        
-        let pixelBuffer = output.value(forKey: "m_PixelBufferQueue") as? CVPixelBuffer
-        guard let buffer = pixelBuffer else { return nil }
+        guard let buffer = latestPixelBuffer else { return nil }
         
         let ciImage = CIImage(cvPixelBuffer: buffer)
         let context = CIContext()
@@ -422,6 +420,7 @@ class CameraManager: NSObject, ObservableObject {
 extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        latestPixelBuffer = pixelBuffer
         processFrame(pixelBuffer)
     }
 }
