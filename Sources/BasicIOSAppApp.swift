@@ -50,7 +50,7 @@ struct CameraContainerView: View {
 }
 
 struct FaceTarget: Identifiable {
-    let id = UUID()
+    let id: Int
     var rect: CGRect
     var confidence: Float = 1.0
     var recognizedName: String? = nil
@@ -68,7 +68,8 @@ class CameraManager: NSObject, ObservableObject {
     var onFacesDetected: (([FaceTarget]) -> Void)?
     
     private var sequenceHandler: VNSequenceRequestHandler?
-    private var trackedFaces: [(observation: VNFaceObservation, name: String?)] = []
+    private var trackedFaces: [(id: Int, observation: VNFaceObservation, name: String?)] = []
+    private var nextFaceId = 0
     private var frameCount = 0
     private let detectEveryNFrames = 8
     
@@ -114,6 +115,7 @@ class CameraManager: NSObject, ObservableObject {
         isFrontCamera = (position == .front)
         isReady = true
         trackedFaces = []
+        nextFaceId = 0
         
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             if self?.captureSession.isRunning == false {
@@ -173,22 +175,62 @@ class CameraManager: NSObject, ObservableObject {
             try? handler.perform([detectRequest, landmarksRequest], on: pixelBuffer)
             
             if let rectangles = detectRequest.results, !rectangles.isEmpty {
-                trackedFaces = rectangles.map { rect in
+                let detectedRects = rectangles.map { $0.boundingBox }
+                let matchedFaces = matchFaces(oldFaces: trackedFaces, newRects: detectedRects)
+                
+                trackedFaces = rectangles.enumerated().map { index, rect in
                     let name = faceClassifier?.recognize(observation: rect, pixelBuffer: pixelBuffer)
-                    return (rect, name)
+                    let id = matchedFaces.first { $0.newIndex == index }?.id ?? nextFaceId
+                    if !matchedFaces.contains(where: { $0.id == id && $0.newIndex == index }) && !trackedFaces.contains(where: { $0.id == id }) {
+                        nextFaceId += 1
+                    }
+                    return (id: id, observation: rect, name: name)
                 }
+                
+                nextFaceId = (trackedFaces.map { $0.id }.max() ?? 0) + 1
             } else {
                 trackedFaces = []
             }
         }
         
         faceTargets = trackedFaces.map { tracked in
-            FaceTarget(rect: tracked.observation.boundingBox, confidence: tracked.observation.confidence, recognizedName: tracked.name)
+            FaceTarget(id: tracked.id, rect: tracked.observation.boundingBox, confidence: tracked.observation.confidence, recognizedName: tracked.name)
         }
         
         DispatchQueue.main.async { [weak self] in
             self?.onFacesDetected?(faceTargets)
         }
+    }
+    
+    private func matchFaces(oldFaces: [(id: Int, observation: VNFaceObservation, name: String?)], newRects: [CGRect]) -> [(id: Int, newIndex: Int)] {
+        var matches: [(id: Int, newIndex: Int)] = []
+        
+        for (newIndex, newRect) in newRects.enumerated() {
+            var bestMatch: (oldIndex: Int, iou: CGFloat) = (-1, 0)
+            
+            for (oldIndex, old) in oldFaces.enumerated() {
+                let iou = calculateIoU(old.observation.boundingBox, newRect)
+                if iou > bestMatch.iou && iou > 0.3 {
+                    bestMatch = (oldIndex, iou)
+                }
+            }
+            
+            if bestMatch.oldIndex >= 0 {
+                matches.append((id: oldFaces[bestMatch.oldIndex].id, newIndex: newIndex))
+            }
+        }
+        
+        return matches
+    }
+    
+    private func calculateIoU(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let intersection = a.intersection(b)
+        let interArea = intersection.width * intersection.height
+        let aArea = a.width * a.height
+        let bArea = b.width * b.height
+        let unionArea = aArea + bArea - interArea
+        guard unionArea > 0 else { return 0 }
+        return interArea / unionArea
     }
 }
 
@@ -797,8 +839,8 @@ class CameraPreviewUIView: UIView {
     private var cornerLayers: [CAShapeLayer] = []
     private var nameLabels: [CATextLayer] = []
     
-    private var targetRects: [(rect: CGRect, name: String?)] = []
-    private var displayRects: [(rect: CGRect, name: String, alpha: CGFloat)] = []
+    private var displayFaces: [Int: (rect: CGRect, name: String, alpha: CGFloat)] = [:]
+    private var sortedFaceIds: [Int] = []
     private let smoothing: CGFloat = 0.3
     private let fadeSpeed: CGFloat = 0.15
     
@@ -823,45 +865,53 @@ class CameraPreviewUIView: UIView {
     @objc private func updateAnimation() {
         var needsUpdate = false
         
-        if targetRects.isEmpty {
-            for i in 0..<displayRects.count {
-                if displayRects[i].alpha > 0 {
-                    displayRects[i].alpha = max(0, displayRects[i].alpha - fadeSpeed)
+        let currentIds = Set(displayFaces.keys)
+        var targetIds = Set<Int>()
+        
+        for (id, display) in displayFaces {
+            if display.alpha > 0 {
+                let newRect = CGRect(
+                    x: display.rect.origin.x * (1 - smoothing) + (displayFaces[id]?.rect.origin.x ?? display.rect.origin.x) * smoothing,
+                    y: display.rect.origin.y * (1 - smoothing) + (displayFaces[id]?.rect.origin.y ?? display.rect.origin.y) * smoothing,
+                    width: display.rect.width * (1 - smoothing) + (displayFaces[id]?.rect.width ?? display.rect.width) * smoothing,
+                    height: display.rect.height * (1 - smoothing) + (displayFaces[id]?.rect.height ?? display.rect.height) * smoothing
+                )
+                displayFaces[id] = (rect: newRect, name: display.name, alpha: display.alpha - fadeSpeed)
+                if displayFaces[id]!.alpha <= 0 {
+                    displayFaces.removeValue(forKey: id)
+                    needsUpdate = true
+                } else {
                     needsUpdate = true
                 }
             }
-            displayRects.removeAll { $0.alpha <= 0 }
-        } else {
-            while displayRects.count < targetRects.count {
-                displayRects.append((rect: .zero, name: "", alpha: 0))
-            }
-            while displayRects.count > targetRects.count {
-                displayRects.removeLast()
-            }
-            
-            for i in 0..<min(targetRects.count, displayRects.count) {
-                let target = targetRects[i]
-                let current = displayRects[i].rect
-                
-                displayRects[i].rect = CGRect(
-                    x: current.origin.x + (target.rect.origin.x - current.origin.x) * smoothing,
-                    y: current.origin.y + (target.rect.origin.y - current.origin.y) * smoothing,
-                    width: current.width + (target.rect.width - current.width) * smoothing,
-                    height: current.height + (target.rect.height - current.height) * smoothing
-                )
-                displayRects[i].name = target.name ?? ""
-                displayRects[i].alpha = min(1, displayRects[i].alpha + fadeSpeed * 2)
-                needsUpdate = true
-            }
         }
         
-        if needsUpdate {
+        if needsUpdate || !displayFaces.isEmpty {
             updateLayers()
         }
     }
     
     func updateFaces(_ faces: [FaceTarget], bounds: CGRect) {
-        targetRects = faces.map { ($0.rect, $0.recognizedName) }
+        for face in faces {
+            if let existing = displayFaces[face.id] {
+                displayFaces[face.id] = (rect: face.rect, name: face.recognizedName ?? "", alpha: 1)
+            } else {
+                displayFaces[face.id] = (rect: face.rect, name: face.recognizedName ?? "", alpha: 0)
+            }
+        }
+        
+        let currentIds = Set(displayFaces.keys)
+        let newIds = Set(faces.map { $0.id })
+        let toRemove = currentIds.subtracting(newIds)
+        for id in toRemove {
+            if let existing = displayFaces[id], existing.alpha > 0 {
+                displayFaces[id] = (rect: existing.rect, name: existing.name, alpha: max(0, existing.alpha - fadeSpeed * 2))
+            } else {
+                displayFaces.removeValue(forKey: id)
+            }
+        }
+        
+        sortedFaceIds = faces.map { $0.id }
     }
     
     private func updateLayers() {
@@ -874,7 +924,7 @@ class CameraPreviewUIView: UIView {
         
         let bounds = self.bounds
         
-        for display in displayRects {
+        for (_, display) in displayFaces {
             guard display.alpha > 0 else { continue }
             
             let centerX = display.rect.midX * bounds.width
