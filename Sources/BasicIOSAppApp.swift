@@ -68,8 +68,9 @@ class CameraManager: NSObject, ObservableObject {
     var onFacesDetected: (([FaceTarget]) -> Void)?
     
     private var sequenceHandler: VNSequenceRequestHandler?
-    private var frameCount = 0
-    private let detectEveryNFrames = 3
+    private var trackedFace: VNFaceObservation?
+    private var lastDetectTime: Date = .distantPast
+    private let detectInterval: TimeInterval = 2.0
     
     var faceClassifier: FaceClassifier?
     
@@ -112,6 +113,7 @@ class CameraManager: NSObject, ObservableObject {
         captureSession.commitConfiguration()
         isFrontCamera = (position == .front)
         isReady = true
+        trackedFace = nil
         
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             if self?.captureSession.isRunning == false {
@@ -161,28 +163,36 @@ class CameraManager: NSObject, ObservableObject {
     private func processFrame(_ pixelBuffer: CVPixelBuffer) {
         guard let handler = sequenceHandler else { return }
         
-        frameCount += 1
-        guard frameCount % detectEveryNFrames == 0 else { return }
+        let now = Date()
+        let faceTargets: [FaceTarget]
         
-        let detectRectangles = VNDetectFaceRectanglesRequest()
-        let detectLandmarks = VNDetectFaceLandmarksRequest()
-        
-        try? handler.perform([detectRectangles, detectLandmarks], on: pixelBuffer)
-        
-        guard let rectangles = detectRectangles.results, !rectangles.isEmpty else {
-            DispatchQueue.main.async { [weak self] in
-                self?.onFacesDetected?([])
+        if let tracked = trackedFace, now.timeIntervalSince(lastDetectTime) < detectInterval {
+            let trackRequest = VNTrackObjectRequest(detectedObjectObservation: tracked)
+            trackRequest.trackingLevel = .accurate
+            try? handler.perform([trackRequest], on: pixelBuffer)
+            
+            if let result = trackRequest.results?.first as? VNFaceObservation {
+                trackedFace = result
+                let name = faceClassifier?.recognize(observation: result, pixelBuffer: pixelBuffer)
+                faceTargets = [FaceTarget(rect: result.boundingBox, confidence: result.confidence, recognizedName: name)]
+            } else {
+                trackedFace = nil
+                faceTargets = []
             }
-            return
-        }
-        
-        let faceTargets: [FaceTarget] = rectangles.compactMap { observation -> FaceTarget? in
-            let name = faceClassifier?.recognize(observation: observation, pixelBuffer: pixelBuffer)
-            return FaceTarget(
-                rect: observation.boundingBox,
-                confidence: observation.confidence,
-                recognizedName: name
-            )
+        } else {
+            let detectRequest = VNDetectFaceRectanglesRequest()
+            let landmarksRequest = VNDetectFaceLandmarksRequest()
+            try? handler.perform([detectRequest, landmarksRequest], on: pixelBuffer)
+            
+            if let rectangles = detectRequest.results, !rectangles.isEmpty {
+                trackedFace = rectangles.first
+                lastDetectTime = now
+                let name = faceClassifier?.recognize(observation: rectangles.first!, pixelBuffer: pixelBuffer)
+                faceTargets = [FaceTarget(rect: rectangles.first!.boundingBox, confidence: rectangles.first!.confidence, recognizedName: name)]
+            } else {
+                trackedFace = nil
+                faceTargets = []
+            }
         }
         
         DispatchQueue.main.async { [weak self] in
@@ -206,7 +216,7 @@ struct FaceEmbedding: Codable {
 
 class FaceClassifier {
     private var embeddings: [FaceEmbedding] = []
-    private let minMatchConfidence: Float = 0.75
+    private let minMatchConfidence: Float = 0.83
     private let maxStoredFacesPerPerson = 20
     
     private var storageURL: URL {
