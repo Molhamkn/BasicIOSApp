@@ -441,11 +441,14 @@ class ScreenRecorder: NSObject, ObservableObject {
     
     private let recorder = RPScreenRecorder.shared()
     @Published var isRecording = false
-    @Published var lastFrame: UIImage?
-    private var frameTimer: Timer?
+    private var recordingCompletion: ((UIImage?) -> Void)?
     
     override init() {
         super.init()
+    }
+    
+    func checkAvailability() -> Bool {
+        return recorder.isAvailable
     }
     
     func startCapture(completion: @escaping (UIImage?) -> Void) {
@@ -454,43 +457,79 @@ class ScreenRecorder: NSObject, ObservableObject {
             return
         }
         
-        recorder.startCapture { [weak self] sampleBuffer, bufferType, error in
-            guard let self = self,
-                  let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-            
-            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            let context = CIContext()
-            if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
-                DispatchQueue.main.async {
-                    self.lastFrame = UIImage(cgImage: cgImage)
-                }
-            }
-        } completionHandler: { [weak self] error in
+        recordingCompletion = completion
+        isRecording = true
+        
+        recorder.isMicrophoneEnabled = false
+        recorder.startRecording { [weak self] error in
             DispatchQueue.main.async {
-                if error == nil {
-                    self?.isRecording = true
-                    self?.captureFrame(completion: completion)
+                if error != nil {
+                    self?.isRecording = false
+                    self?.recordingCompletion?(nil)
+                    self?.recordingCompletion = nil
                 } else {
-                    completion(nil)
+                    // Recording started! Wait 2 seconds then stop
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self?.stopCapture()
+                    }
                 }
-            }
-        }
-    }
-    
-    func captureFrame(completion: @escaping (UIImage?) -> Void) {
-        if let frame = lastFrame {
-            completion(frame)
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                completion(self?.lastFrame)
             }
         }
     }
     
     func stopCapture() {
-        recorder.stopCapture { _ in
+        recorder.stopRecording { [weak self] previewController, error in
             DispatchQueue.main.async {
-                self.isRecording = false
+                self?.isRecording = false
+                
+                guard let previewController = previewController else {
+                    self?.recordingCompletion?(nil)
+                    self?.recordingCompletion = nil
+                    return
+                }
+                
+                // Try to get thumbnail from preview
+                previewController.loadPreviewItems { items in
+                    if let item = items.first {
+                        self?.extractFrameFromVideo(url: item.url) { image in
+                            DispatchQueue.main.async {
+                                self?.recordingCompletion?(image)
+                                self?.recordingCompletion = nil
+                            }
+                        }
+                    } else {
+                        DispatchQueue.main.async {
+                            self?.recordingCompletion?(nil)
+                            self?.recordingCompletion = nil
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private func extractFrameFromVideo(url: URL, completion: @escaping (UIImage?) -> Void) {
+        let asset = AVAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 512, height: 512)
+        
+        let time = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, cgImage, _, _, _ in
+            if let cgImage = cgImage {
+                completion(UIImage(cgImage: cgImage))
+            } else {
+                completion(nil)
+            }
+        }
+    }
+    
+    func stopRecordingManually() {
+        recorder.stopRecording { [weak self] _, _ in
+            DispatchQueue.main.async {
+                self?.isRecording = false
+                self?.recordingCompletion?(nil)
+                self?.recordingCompletion = nil
             }
         }
     }
