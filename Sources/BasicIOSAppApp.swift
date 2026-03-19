@@ -12,6 +12,9 @@ struct CameraContainerView: View {
     @State private var showTrainingMode = false
     @State private var showSettings = false
     @State private var showChat = false
+    @State private var showScreenAnalysisResult = false
+    @State private var screenAnalysisText = ""
+    @State private var isAnalyzingScreen = false
     
     var body: some View {
         ZStack {
@@ -35,7 +38,8 @@ struct CameraContainerView: View {
                 faceCount: detectedFaces.count,
                 showTrainingMode: $showTrainingMode,
                 showSettings: $showSettings,
-                showChat: $showChat
+                showChat: $showChat,
+                onAnalyzeScreen: analyzeCurrentScreen
             )
             
             if showTrainingMode {
@@ -49,6 +53,16 @@ struct CameraContainerView: View {
             if showChat {
                 ChatView(showChat: $showChat)
             }
+            
+            if showScreenAnalysisResult {
+                ScreenAnalysisOverlay(text: screenAnalysisText, onDismiss: { showScreenAnalysisResult = false })
+            }
+            
+            if isAnalyzingScreen {
+                ProgressView()
+                    .progressViewStyle(CircularProgressViewStyle(tint: .cyan))
+                    .scaleEffect(2)
+            }
         }
         .onAppear {
             cameraManager.onFacesDetected = { faces in
@@ -58,6 +72,116 @@ struct CameraContainerView: View {
             }
             cameraManager.setup()
         }
+    }
+    
+    func analyzeCurrentScreen() {
+        isAnalyzingScreen = true
+        screenAnalysisText = ""
+        
+        guard let image = cameraManager.captureCurrentFrame() else {
+            isAnalyzingScreen = false
+            screenAnalysisText = "Could not capture screen"
+            showScreenAnalysisResult = true
+            return
+        }
+        
+        guard let imageData = image.jpegData(compressionQuality: 0.5) else {
+            isAnalyzingScreen = false
+            screenAnalysisText = "Could not process image"
+            showScreenAnalysisResult = true
+            return
+        }
+        
+        let base64Image = imageData.base64EncodedString()
+        
+        let requestBody: [String: Any] = [
+            "model": "anthropic/claude-3-haiku-20240307",
+            "messages": [
+                ["role": "system", "content": "You are JARVIS, Tony Stark's AI assistant. The user is pointing their phone camera at their screen. Analyze what you see and provide a brief, witty response about the content on the screen. Be British, concise, and helpful."],
+                ["role": "user", "content": [
+                    ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64Image)"]],
+                    ["type": "text", "text": "What do you see on this screen? Analyze its contents."]
+                ]]
+            ],
+            "max_tokens": 200
+        ]
+        
+        guard let url = URL(string: "https://openrouter.ai/api/v1/chat/completions") else {
+            isAnalyzingScreen = false
+            screenAnalysisText = "Invalid URL"
+            showScreenAnalysisResult = true
+            return
+        }
+        
+        let apiKey = UserDefaults.standard.string(forKey: "openrouter_api_key") ?? ""
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
+        request.timeoutInterval = 30
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                self.isAnalyzingScreen = false
+                
+                guard let data = data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let choices = json["choices"] as? [[String: Any]],
+                      let message = choices.first?["message"] as? [String: Any],
+                      let responseText = message["content"] as? String else {
+                    self.screenAnalysisText = "Could not analyze screen"
+                    self.showScreenAnalysisResult = true
+                    return
+                }
+                
+                self.screenAnalysisText = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.showScreenAnalysisResult = true
+                
+                if UserDefaults.standard.bool(forKey: "jarvis_enabled") {
+                    Jarvis.shared.speak(responseText)
+                }
+            }
+        }.resume()
+    }
+}
+
+struct ScreenAnalysisOverlay: View {
+    let text: String
+    let onDismiss: () -> Void
+    
+    var body: some View {
+        VStack {
+            Spacer()
+            
+            VStack(spacing: 15) {
+                HStack {
+                    Image(systemName: "brain.head.profile")
+                        .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                    Text("JARVIS ANALYSIS")
+                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                    Spacer()
+                    Button(action: onDismiss) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.gray)
+                    }
+                }
+                
+                Text(text)
+                    .font(.system(size: 16))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(20)
+            .background(Color.black.opacity(0.9))
+            .cornerRadius(15)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 100)
+        }
+        .background(Color.black.opacity(0.3))
     }
 }
 
@@ -177,6 +301,19 @@ class CameraManager: NSObject, ObservableObject {
                 device.unlockForConfiguration()
             } catch {}
         }
+    }
+    
+    func captureCurrentFrame() -> UIImage? {
+        guard let output = videoOutput else { return nil }
+        
+        let pixelBuffer = output.value(forKey: "m_PixelBufferQueue") as? CVPixelBuffer
+        guard let buffer = pixelBuffer else { return nil }
+        
+        let ciImage = CIImage(cvPixelBuffer: buffer)
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+        
+        return UIImage(cgImage: cgImage)
     }
     
     private func processFrame(_ pixelBuffer: CVPixelBuffer) {
@@ -1079,6 +1216,7 @@ struct IronManHUD: View {
     var showTrainingMode: Binding<Bool>? = nil
     var showSettings: Binding<Bool>? = nil
     var showChat: Binding<Bool>? = nil
+    var onAnalyzeScreen: (() -> Void)? = nil
     
     var body: some View {
         VStack {
@@ -1096,6 +1234,15 @@ struct IronManHUD: View {
                 if let chatBinding = showChat {
                     Button(action: { chatBinding.wrappedValue.toggle() }) {
                         Image(systemName: "message.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                            .padding(.trailing, 10)
+                    }
+                }
+                
+                if let analyzeAction = onAnalyzeScreen {
+                    Button(action: analyzeAction) {
+                        Image(systemName: "rectangle.on.rectangle")
                             .font(.system(size: 20))
                             .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
                             .padding(.trailing, 10)
