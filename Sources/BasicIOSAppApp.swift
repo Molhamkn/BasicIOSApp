@@ -69,8 +69,9 @@ class CameraManager: NSObject, ObservableObject {
     
     private var sequenceHandler: VNSequenceRequestHandler?
     private var trackedFace: VNFaceObservation?
-    private var lastDetectTime: Date = .distantPast
-    private let detectInterval: TimeInterval = 2.0
+    private var trackedName: String?
+    private var frameCount = 0
+    private let detectEveryNFrames = 8
     
     var faceClassifier: FaceClassifier?
     
@@ -163,36 +164,26 @@ class CameraManager: NSObject, ObservableObject {
     private func processFrame(_ pixelBuffer: CVPixelBuffer) {
         guard let handler = sequenceHandler else { return }
         
-        let now = Date()
-        let faceTargets: [FaceTarget]
+        frameCount += 1
         
-        if let tracked = trackedFace, now.timeIntervalSince(lastDetectTime) < detectInterval {
-            let trackRequest = VNTrackObjectRequest(detectedObjectObservation: tracked)
-            trackRequest.trackingLevel = .accurate
-            try? handler.perform([trackRequest], on: pixelBuffer)
-            
-            if let result = trackRequest.results?.first as? VNFaceObservation {
-                trackedFace = result
-                let name = faceClassifier?.recognize(observation: result, pixelBuffer: pixelBuffer)
-                faceTargets = [FaceTarget(rect: result.boundingBox, confidence: result.confidence, recognizedName: name)]
-            } else {
-                trackedFace = nil
-                faceTargets = []
-            }
-        } else {
+        var faceTargets: [FaceTarget] = []
+        
+        if frameCount % detectEveryNFrames == 0 || trackedFace == nil {
             let detectRequest = VNDetectFaceRectanglesRequest()
             let landmarksRequest = VNDetectFaceLandmarksRequest()
             try? handler.perform([detectRequest, landmarksRequest], on: pixelBuffer)
             
             if let rectangles = detectRequest.results, !rectangles.isEmpty {
                 trackedFace = rectangles.first
-                lastDetectTime = now
-                let name = faceClassifier?.recognize(observation: rectangles.first!, pixelBuffer: pixelBuffer)
-                faceTargets = [FaceTarget(rect: rectangles.first!.boundingBox, confidence: rectangles.first!.confidence, recognizedName: name)]
+                trackedName = faceClassifier?.recognize(observation: rectangles.first!, pixelBuffer: pixelBuffer)
             } else {
                 trackedFace = nil
-                faceTargets = []
+                trackedName = nil
             }
+        }
+        
+        if let face = trackedFace {
+            faceTargets = [FaceTarget(rect: face.boundingBox, confidence: face.confidence, recognizedName: trackedName)]
         }
         
         DispatchQueue.main.async { [weak self] in
@@ -806,7 +797,58 @@ class CameraPreviewUIView: UIView {
     private var cornerLayers: [CAShapeLayer] = []
     private var nameLabels: [CATextLayer] = []
     
+    private var targetRect: CGRect = .zero
+    private var displayRect: CGRect = .zero
+    private var targetName: String?
+    private var displayName: String?
+    private let smoothing: CGFloat = 0.3
+    
+    private var displayLink: CADisplayLink?
+    
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        startAnimation()
+    }
+    
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        startAnimation()
+    }
+    
+    private func startAnimation() {
+        displayLink = CADisplayLink(target: self, selector: #selector(updateAnimation))
+        displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60)
+        displayLink?.add(to: .main, forMode: .common)
+    }
+    
+    @objc private func updateAnimation() {
+        guard targetRect != .zero || displayRect != .zero else { return }
+        
+        displayRect = CGRect(
+            x: displayRect.origin.x + (targetRect.origin.x - displayRect.origin.x) * smoothing,
+            y: displayRect.origin.y + (targetRect.origin.y - displayRect.origin.y) * smoothing,
+            width: displayRect.width + (targetRect.width - displayRect.width) * smoothing,
+            height: displayRect.height + (targetRect.height - displayRect.height) * smoothing
+        )
+        
+        if displayName != targetName {
+            displayName = targetName
+        }
+        
+        updateLayers()
+    }
+    
     func updateFaces(_ faces: [FaceTarget], bounds: CGRect) {
+        if let face = faces.first {
+            targetRect = face.rect
+            targetName = face.recognizedName
+        } else {
+            targetRect = .zero
+            targetName = nil
+        }
+    }
+    
+    private func updateLayers() {
         faceLayers.forEach { $0.removeFromSuperlayer() }
         cornerLayers.forEach { $0.removeFromSuperlayer() }
         nameLabels.forEach { $0.removeFromSuperlayer() }
@@ -814,10 +856,12 @@ class CameraPreviewUIView: UIView {
         cornerLayers.removeAll()
         nameLabels.removeAll()
         
-        for face in faces {
-            let centerX = face.rect.midX * bounds.width
-            let centerY = (1 - face.rect.midY) * bounds.height
-            let size = max(face.rect.width, face.rect.height) * bounds.width
+        guard displayRect != .zero else { return }
+        
+        let bounds = self.bounds
+        let centerX = displayRect.midX * bounds.width
+        let centerY = (1 - displayRect.midY) * bounds.height
+        let size = max(displayRect.width, displayRect.height) * bounds.width
             
             let outerRadius = size / 2 + 8
             let innerRadius = size / 2 - 3
@@ -891,7 +935,7 @@ class CameraPreviewUIView: UIView {
                 cornerLayers.append(lineLayer)
             }
             
-            if let name = face.recognizedName {
+            if let name = displayName {
                 let nameLayer = CATextLayer()
                 nameLayer.string = name
                 nameLayer.fontSize = 14
