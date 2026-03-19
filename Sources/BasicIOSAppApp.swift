@@ -492,26 +492,8 @@ struct ImagePicker: UIViewControllerRepresentable {
                     if let image = object as? UIImage {
                         DispatchQueue.main.async {
                             self.parent.images.append(image)
-        }
-    }
-    
-    private func transformFaceRect(_ rect: CGRect, bounds: CGRect, orientation: UIInterfaceOrientation) -> (x: CGFloat, y: CGFloat, size: CGFloat) {
-        let x = rect.midX * bounds.width
-        let y = (1 - rect.midY) * bounds.height
-        let size = max(rect.width, rect.height) * bounds.width
-        
-        switch orientation {
-        case .landscapeLeft:
-            return (x: bounds.height - y, y: x, size: size)
-        case .landscapeRight:
-            return (x: y, y: bounds.width - x, size: size)
-        case .portraitUpsideDown:
-            return (x: bounds.width - x, y: bounds.height - y, size: size)
-        default:
-            return (x: x, y: y, size: size)
-        }
-    }
-}
+                    }
+                }
             }
         }
     }
@@ -635,10 +617,10 @@ class CameraPreviewUIView: UIView {
             
             let lineLength: CGFloat = 25
             let crosshairOffsets: [(CGFloat, CGFloat)] = [
-                (CGFloat(0), -innerRadius - lineLength),
-                (CGFloat(0), innerRadius + lineLength),
-                (-innerRadius - lineLength, CGFloat(0)),
-                (innerRadius + lineLength, CGFloat(0))
+                (0 as CGFloat, -innerRadius - lineLength),
+                (0 as CGFloat, innerRadius + lineLength),
+                (-innerRadius - lineLength, 0 as CGFloat),
+                (innerRadius + lineLength, 0 as CGFloat)
             ]
             
             for (dx, dy) in crosshairOffsets {
@@ -664,6 +646,23 @@ class CameraPreviewUIView: UIView {
                 layer.addSublayer(nameLayer)
                 nameLabels.append(nameLayer)
             }
+        }
+    }
+    
+    private func transformFaceRect(_ rect: CGRect, bounds: CGRect, orientation: UIInterfaceOrientation) -> (x: CGFloat, y: CGFloat, size: CGFloat) {
+        let x = rect.midX * bounds.width
+        let y = (1 - rect.midY) * bounds.height
+        let size = max(rect.width, rect.height) * bounds.width
+        
+        switch orientation {
+        case .landscapeLeft:
+            return (x: bounds.height - y, y: x, size: size)
+        case .landscapeRight:
+            return (x: y, y: bounds.width - x, size: size)
+        case .portraitUpsideDown:
+            return (x: bounds.width - x, y: bounds.height - y, size: size)
+        default:
+            return (x: x, y: y, size: size)
         }
     }
 }
