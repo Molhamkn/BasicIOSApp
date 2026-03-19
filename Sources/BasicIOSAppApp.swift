@@ -179,13 +179,12 @@ class CameraManager: NSObject, ObservableObject {
         }
         
         let faceTargets: [FaceTarget] = rectangles.compactMap { observation -> FaceTarget? in
-            let landmarks = detectLandmarks.results?.first { $0.uuid == observation.uuid }
             let name = faceClassifier?.recognize(observation: observation, pixelBuffer: pixelBuffer)
             return FaceTarget(
                 rect: observation.boundingBox,
                 confidence: observation.confidence,
                 recognizedName: name,
-                faceId: Int(observation.trackingNumber)
+                faceId: nil
             )
         }
         
@@ -662,7 +661,7 @@ struct CameraCaptureView: UIViewControllerRepresentable {
     }
     
     class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-        let parent: CameraCaptureView
+        var parent: CameraCaptureView
         
         init(_ parent: CameraCaptureView) {
             self.parent = parent
@@ -704,7 +703,7 @@ struct ImagePicker: UIViewControllerRepresentable {
     }
     
     class Coordinator: NSObject, PHPickerViewControllerDelegate {
-        let parent: ImagePicker
+        var parent: ImagePicker
         
         init(_ parent: ImagePicker) {
             self.parent = parent
