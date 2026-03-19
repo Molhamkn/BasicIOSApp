@@ -12,17 +12,19 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Setup XcodeGen
+    - name: Setup XcodeGen and CocoaPods
       run: |
         brew install xcodegen
+        gem install cocoapods
     
-    - name: Generate Xcode Project
+    - name: Generate Xcode Project and Install Pods
       run: |
         xcodegen generate
+        pod install
     
     - name: Build for Device
       run: |
-        xcodebuild -project BasicIOSApp.xcodeproj -scheme BasicIOSApp -configuration Release -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO -derivedDataPath build build
+        xcodebuild -workspace BasicIOSApp.xcworkspace -scheme BasicIOSApp -configuration Release -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO -derivedDataPath build build
     
     - name: Create IPA
       run: |

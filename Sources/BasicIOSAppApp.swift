@@ -215,68 +215,110 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 }
 
 class FaceClassifier {
-    struct TrainingSample {
-        var aspectRatio: CGFloat
-        var relativeSize: CGFloat
-        var label: String
-    }
-    
-    private var trainingSamples: [TrainingSample] = []
+    private var recognizer: Ptr<LBPHFaceRecognizer>?
+    private var labels: [Int32: String] = [:]
+    private var labelCounter: Int32 = 0
+    private var trainingImages: [Mat] = []
+    private var trainingLabels: [Int32] = []
     private var isTrained = false
     
-    func addTrainingSample(aspectRatio: CGFloat, relativeSize: CGFloat, label: String) {
-        trainingSamples.append(TrainingSample(aspectRatio: aspectRatio, relativeSize: relativeSize, label: label))
-        isTrained = true
+    init() {
+        recognizer = createLBPHFaceRecognizer()
     }
     
-    func recognize(faceRect: CGRect) -> String? {
-        guard isTrained, !trainingSamples.isEmpty else { return nil }
+    func addTrainingSample(image: UIImage, label: String) {
+        guard let cgImage = image.cgImage else { return }
         
-        let inputAspect = faceRect.width / max(faceRect.height, 0.001)
-        let inputSize = faceRect.width * faceRect.height
+        let mat = Mat(cgImage: cgImage)
+        var gray = Mat()
+        cvtColor(mat, gray, COLOR_BGR2GRAY)
         
-        var bestMatch: (label: String, score: CGFloat) = (label: "", score: 0)
+        let resized = Mat()
+        resize(gray, resized, Size(100, 100))
         
-        for sample in trainingSamples {
-            let aspectDiff = abs(inputAspect - sample.aspectRatio)
-            let sizeDiff = abs(inputSize - sample.relativeSize)
-            let score = 1 / (aspectDiff + sizeDiff + 0.001)
-            
-            if score > bestMatch.score {
-                bestMatch = (label: sample.label, score: score)
+        var intLabel: Int32 = 0
+        var found = false
+        for (key, value) in labels {
+            if value == label {
+                intLabel = key
+                found = true
+                break
             }
         }
         
-        if bestMatch.score > 100 {
-            return bestMatch.label
+        if !found {
+            labelCounter += 1
+            intLabel = labelCounter
+            labels[intLabel] = label
+        }
+        
+        trainingImages.append(resized)
+        trainingLabels.append(intLabel)
+        isTrained = false
+    }
+    
+    func train() {
+        guard trainingImages.count >= 3 else { return }
+        
+        let labelsArray = trainingLabels
+        recognizer?.train(trainingImages, labels: labelsArray)
+        isTrained = true
+        save()
+    }
+    
+    func recognize(faceImage: UIImage) -> String? {
+        guard isTrained, let recognizer = recognizer else { return nil }
+        guard let cgImage = faceImage.cgImage else { return nil }
+        
+        let mat = Mat(cgImage: cgImage)
+        var gray = Mat()
+        cvtColor(mat, gray, COLOR_BGR2GRAY)
+        
+        let resized = Mat()
+        resize(gray, resized, Size(100, 100))
+        
+        var predictedLabel: Int32 = 0
+        var confidence: Double = 0
+        recognizer.predict(resized, label: &predictedLabel, confidence: &confidence)
+        
+        if confidence < 80 {
+            return labels[predictedLabel]
         }
         return nil
     }
     
     func getTrainedNames() -> [String] {
-        return Array(Set(trainingSamples.map { $0.label })).sorted()
+        return Array(Set(labels.values)).sorted()
     }
     
     func save() {
-        let data = trainingSamples.map { ["aspectRatio": $0.aspectRatio, "relativeSize": $0.relativeSize, "label": $0.label] }
-        UserDefaults.standard.set(data, forKey: "FaceTrainingData")
+        let labelData = labels.map { ["key": $0.key, "value": $0.value] }
+        UserDefaults.standard.set(labelData, forKey: "FaceLabels")
+        UserDefaults.standard.set(labelCounter, forKey: "FaceLabelCounter")
     }
     
     func load() {
-        guard let data = UserDefaults.standard.array(forKey: "FaceTrainingData") as? [[String: Any]] else { return }
-        trainingSamples = data.compactMap { dict in
-            guard let aspectRatio = dict["aspectRatio"] as? CGFloat,
-                  let relativeSize = dict["relativeSize"] as? CGFloat,
-                  let label = dict["label"] as? String else { return nil }
-            return TrainingSample(aspectRatio: aspectRatio, relativeSize: relativeSize, label: label)
+        guard let labelData = UserDefaults.standard.array(forKey: "FaceLabels") as? [[String: Any]] else { return }
+        for dict in labelData {
+            if let key = dict["key"] as? Int32, let value = dict["value"] as? String {
+                labels[key] = value
+            }
         }
-        isTrained = !trainingSamples.isEmpty
+        labelCounter = Int32(UserDefaults.standard.integer(forKey: "FaceLabelCounter"))
+        if !trainingImages.isEmpty {
+            train()
+        }
     }
     
     func clear() {
-        trainingSamples = []
+        recognizer = createLBPHFaceRecognizer()
+        trainingImages = []
+        trainingLabels = []
+        labels = [:]
+        labelCounter = 0
         isTrained = false
-        UserDefaults.standard.removeObject(forKey: "FaceTrainingData")
+        UserDefaults.standard.removeObject(forKey: "FaceLabels")
+        UserDefaults.standard.removeObject(forKey: "FaceLabelCounter")
     }
 }
 
@@ -414,16 +456,10 @@ struct TrainingModeView: View {
         
         DispatchQueue.global(qos: .userInitiated).async {
             for image in capturedImages {
-                if let features = extractFaceFeatures(from: image) {
-                    cameraManager.faceClassifier?.addTrainingSample(
-                        aspectRatio: features.aspectRatio,
-                        relativeSize: features.relativeSize,
-                        label: newPersonName
-                    )
-                }
+                cameraManager.faceClassifier?.addTrainingSample(image: image, label: newPersonName)
             }
             
-            cameraManager.faceClassifier?.save()
+            cameraManager.faceClassifier?.train()
             
             DispatchQueue.main.async {
                 isTraining = false
@@ -436,24 +472,6 @@ struct TrainingModeView: View {
                 }
             }
         }
-    }
-    
-    func extractFaceFeatures(from image: UIImage) -> (aspectRatio: CGFloat, relativeSize: CGFloat)? {
-        guard let cgImage = image.cgImage else { return nil }
-        
-        let request = VNDetectFaceRectanglesRequest()
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        
-        try? handler.perform([request])
-        
-        guard let results = request.results, !results.isEmpty else { return nil }
-        
-        let face = results[0].boundingBox
-        
-        return (
-            aspectRatio: face.width / max(face.height, 0.001),
-            relativeSize: face.width * face.height
-        )
     }
 }
 
