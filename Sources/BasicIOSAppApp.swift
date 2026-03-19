@@ -1552,7 +1552,7 @@ class OpenRouterClient {
         ]
         
         let requestBody: [String: Any] = [
-            "model": "anthropic/claude-3.5-haiku",
+            "model": "openai/gpt-4o-mini",
             "messages": [
                 [
                     "role": "user",
