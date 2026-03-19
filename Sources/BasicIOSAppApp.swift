@@ -97,7 +97,7 @@ struct CameraContainerView: View {
         let requestBody: [String: Any] = [
             "model": "anthropic/claude-3-haiku-20240307",
             "messages": [
-                ["role": "system", "content": "You are JARVIS, Tony Stark's AI assistant. The user is pointing their phone camera at their screen. Analyze what you see and provide a brief, witty response about the content on the screen. Be British, concise, and helpful."],
+                ["role": "system", "content": "You are Ray, Tony Stark's AI assistant. The user is pointing their phone camera at their screen. Analyze what you see and provide a brief, witty response about the content on the screen. Be British, concise, and helpful."],
                 ["role": "user", "content": [
                     ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64Image)"]],
                     ["type": "text", "text": "What do you see on this screen? Analyze its contents."]
@@ -139,7 +139,7 @@ struct CameraContainerView: View {
                 self.screenAnalysisText = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
                 self.showScreenAnalysisResult = true
                 
-                if UserDefaults.standard.bool(forKey: "jarvis_enabled") {
+                if UserDefaults.standard.bool(forKey: "Ray_enabled") {
                     Jarvis.shared.speak(responseText)
                 }
             }
@@ -159,7 +159,7 @@ struct ScreenAnalysisOverlay: View {
                 HStack {
                     Image(systemName: "brain.head.profile")
                         .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
-                    Text("JARVIS ANALYSIS")
+                    Text("Ray ANALYSIS")
                         .font(.system(size: 14, weight: .bold, design: .monospaced))
                         .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
                     Spacer()
@@ -1370,7 +1370,7 @@ struct BasicIOSAppApp: App {
 struct SettingsView: View {
     @Binding var showSettings: Bool
     @State private var apiKey: String = UserDefaults.standard.string(forKey: "openrouter_api_key") ?? ""
-    @State private var jarvisEnabled: Bool = UserDefaults.standard.bool(forKey: "jarvis_enabled")
+    @State private var RayEnabled: Bool = UserDefaults.standard.bool(forKey: "Ray_enabled")
     @State private var showSavedAlert = false
     @State private var showTestImagePicker = false
     @State private var testResult = ""
@@ -1417,9 +1417,9 @@ struct SettingsView: View {
                     .background(Color.white.opacity(0.05))
                     .cornerRadius(10)
                     
-                    Toggle(isOn: $jarvisEnabled) {
+                    Toggle(isOn: $RayEnabled) {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text("JARVIS VOICE")
+                            Text("Ray VOICE")
                                 .font(.system(size: 14, weight: .bold))
                                 .foregroundColor(.white)
                             Text("Voice responses when faces are recognized")
@@ -1432,7 +1432,7 @@ struct SettingsView: View {
                     .cornerRadius(10)
                     
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("JARVIS SETTINGS")
+                        Text("Ray SETTINGS")
                             .font(.system(size: 12, weight: .bold, design: .monospaced))
                             .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
                         
@@ -1526,7 +1526,7 @@ struct SettingsView: View {
                                 .padding(.top, 5)
                         }
                         
-                        Text("Requires JARVISScreenTweak installed")
+                        Text("Requires RayScreenTweak installed")
                             .font(.system(size: 10))
                             .foregroundColor(.gray)
                     }
@@ -1548,7 +1548,7 @@ struct SettingsView: View {
     
     func saveSettings() {
         UserDefaults.standard.set(apiKey, forKey: "openrouter_api_key")
-        UserDefaults.standard.set(jarvisEnabled, forKey: "jarvis_enabled")
+        UserDefaults.standard.set(RayEnabled, forKey: "Ray_enabled")
         showSavedAlert = true
     }
     
@@ -1637,7 +1637,7 @@ class Jarvis: ObservableObject {
     private init() {}
     
     func speak(_ text: String) {
-        guard UserDefaults.standard.bool(forKey: "jarvis_enabled") else { return }
+        guard UserDefaults.standard.bool(forKey: "Ray_enabled") else { return }
         guard Date().timeIntervalSince(lastSpokenTime) > cooldown else { return }
         
         lastSpokenTime = Date()
@@ -1691,7 +1691,7 @@ class OpenRouterClient {
         
         let namesList = knownNames.joined(separator: ", ")
         let prompt = """
-        You are JARVIS, Tony Stark's AI assistant. Identify the person in this image.
+        You are Ray, Tony Stark's AI assistant. Identify the person in this image.
         Known people: \(namesList.isEmpty ? "None" : namesList)
         Respond ONLY with the person's name if recognized, or "Unknown" if not recognized.
         Be brief and precise.
@@ -1759,7 +1759,7 @@ class OpenRouterClient {
         
         let namesList = knownNames.joined(separator: ", ")
         let prompt = """
-        You are JARVIS, Tony Stark's AI assistant. Analyze this face image.
+        You are Ray, Tony Stark's AI assistant. Analyze this face image.
         Known people: \(namesList.isEmpty ? "None yet" : namesList)
         Describe who you see and if they match any known person. Be brief.
         """
@@ -1841,7 +1841,7 @@ class OpenRouterClient {
         }
         
         var messages: [[String: Any]] = [
-            ["role": "system", "content": "You are JARVIS, Tony Stark's AI assistant. Be helpful, witty, and British. Keep responses concise."]
+            ["role": "system", "content": "You are Ray, Tony Stark's AI assistant. Be helpful, witty, and British. Keep responses concise."]
         ]
         
         for msg in history {
@@ -1890,8 +1890,8 @@ class OpenRouterClient {
             return
         }
         
-        let screenshotsDir = "/var/jb/var/mobile/Library/JARVIS/screenshots"
-        let contextPath = "/var/jb/var/mobile/Library/JARVIS/context/current.txt"
+        let screenshotsDir = "/var/jb/var/mobile/Library/Ray/screenshots"
+        let contextPath = "/var/jb/var/mobile/Library/Ray/context/current.txt"
         
         guard let screenshots = try? FileManager.default.contentsOfDirectory(atPath: screenshotsDir) as [String],
               let latestFile = screenshots.sorted().last else {
@@ -1916,7 +1916,7 @@ class OpenRouterClient {
         let requestBody: [String: Any] = [
             "model": "anthropic/claude-3-haiku-20240307",
             "messages": [
-                ["role": "system", "content": "You are JARVIS, Tony Stark's AI assistant. Analyze the user's screen and provide helpful commentary about what you see. Be witty, British, and concise."],
+                ["role": "system", "content": "You are Ray, Tony Stark's AI assistant. Analyze the user's screen and provide helpful commentary about what you see. Be witty, British, and concise."],
                 ["role": "user", "content": "type: text, text: \(contextInfo) What do you see on the screen? Provide a brief analysis."]
             ],
             "max_tokens": 150
@@ -1967,7 +1967,7 @@ struct ChatView: View {
                         .padding()
                 }
                 Spacer()
-                Text("JARVIS")
+                Text("Ray")
                     .font(.system(size: 18, weight: .bold, design: .monospaced))
                     .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
                 Spacer()
@@ -2001,7 +2001,7 @@ struct ChatView: View {
             }
             
             HStack(spacing: 12) {
-                TextField("Talk to JARVIS...", text: $messageText)
+                TextField("Talk to Ray...", text: $messageText)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
                     .font(.system(size: 16))
                 
@@ -2038,10 +2038,10 @@ struct ChatView: View {
         
         OpenRouterClient().chat(message: text, history: Array(history)) { response in
             isLoading = false
-            let jarvisMessage = ChatMessage(role: "assistant", content: response)
-            messages.append(jarvisMessage)
+            let RayMessage = ChatMessage(role: "assistant", content: response)
+            messages.append(RayMessage)
             
-            if UserDefaults.standard.bool(forKey: "jarvis_enabled") {
+            if UserDefaults.standard.bool(forKey: "Ray_enabled") {
                 Jarvis.shared.speak(response)
             }
         }
@@ -2062,7 +2062,7 @@ struct ChatBubble: View {
             if message.role == "assistant" {
                 Image(systemName: "brain.head.profile")
                     .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
-                Text("JARVIS")
+                Text("Ray")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
             }
