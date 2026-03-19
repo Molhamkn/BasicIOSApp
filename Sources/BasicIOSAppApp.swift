@@ -195,15 +195,35 @@ class CameraManager: NSObject, ObservableObject {
             }
         }
         
+        let faceEncoding = extractEncoding(from: pixelBuffer)
+        
         var faceTargets = trackedObservations.map { observation -> FaceTarget in
             var target = FaceTarget(rect: observation.boundingBox)
-            if let name = faceClassifier?.recognize(faceRect: observation.boundingBox) {
+            if let encoding = faceEncoding, let name = faceClassifier?.recognize(encoding: encoding) {
                 target.recognizedName = name
             }
             return target
         }
         
         onFacesDetected?(faceTargets)
+    }
+    
+    private func extractEncoding(from pixelBuffer: CVPixelBuffer) -> Data? {
+        let request = VNGenerateImageFeaturePrintRequest()
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        
+        try? handler.perform([request])
+        
+        guard let result = request.results?.first as? VNFeaturePrintObservation else { return nil }
+        
+        var data = Data()
+        for i in 0..<128 {
+            var value: Float = 0
+            try? result.featurePrint(at: i, value: &value)
+            withUnsafeBytes(of: value) { data.append(contentsOf: $0) }
+        }
+        
+        return data
     }
 }
 
@@ -215,110 +235,77 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 }
 
 class FaceClassifier {
-    private var recognizer: Ptr<LBPHFaceRecognizer>?
-    private var labels: [Int32: String] = [:]
-    private var labelCounter: Int32 = 0
-    private var trainingImages: [Mat] = []
-    private var trainingLabels: [Int32] = []
-    private var isTrained = false
-    
-    init() {
-        recognizer = createLBPHFaceRecognizer()
+    struct FaceEncoding {
+        var data: Data
+        var label: String
     }
     
-    func addTrainingSample(image: UIImage, label: String) {
-        guard let cgImage = image.cgImage else { return }
+    private var encodings: [FaceEncoding] = []
+    private var isTrained = false
+    
+    func addEncoding(_ data: Data, label: String) {
+        encodings.append(FaceEncoding(data: data, label: label))
+        isTrained = true
+    }
+    
+    func recognize(encoding: Data) -> String? {
+        guard isTrained, !encodings.isEmpty else { return nil }
         
-        let mat = Mat(cgImage: cgImage)
-        var gray = Mat()
-        cvtColor(mat, gray, COLOR_BGR2GRAY)
+        var bestMatch: (label: String, distance: Float) = (label: "", distance: Float.greatestFiniteMagnitude)
         
-        let resized = Mat()
-        resize(gray, resized, Size(100, 100))
-        
-        var intLabel: Int32 = 0
-        var found = false
-        for (key, value) in labels {
-            if value == label {
-                intLabel = key
-                found = true
-                break
+        for sample in encodings {
+            let distance = compareEncodings(encoding, sample.data)
+            if distance < bestMatch.distance && distance < 0.6 {
+                bestMatch = (label: sample.label, distance: distance)
             }
         }
         
-        if !found {
-            labelCounter += 1
-            intLabel = labelCounter
-            labels[intLabel] = label
-        }
-        
-        trainingImages.append(resized)
-        trainingLabels.append(intLabel)
-        isTrained = false
-    }
-    
-    func train() {
-        guard trainingImages.count >= 3 else { return }
-        
-        let labelsArray = trainingLabels
-        recognizer?.train(trainingImages, labels: labelsArray)
-        isTrained = true
-        save()
-    }
-    
-    func recognize(faceImage: UIImage) -> String? {
-        guard isTrained, let recognizer = recognizer else { return nil }
-        guard let cgImage = faceImage.cgImage else { return nil }
-        
-        let mat = Mat(cgImage: cgImage)
-        var gray = Mat()
-        cvtColor(mat, gray, COLOR_BGR2GRAY)
-        
-        let resized = Mat()
-        resize(gray, resized, Size(100, 100))
-        
-        var predictedLabel: Int32 = 0
-        var confidence: Double = 0
-        recognizer.predict(resized, label: &predictedLabel, confidence: &confidence)
-        
-        if confidence < 80 {
-            return labels[predictedLabel]
+        if bestMatch.distance < 0.6 {
+            return bestMatch.label
         }
         return nil
     }
     
+    private func compareEncodings(_ a: Data, _ b: Data) -> Float {
+        guard a.count == b.count else { return Float.greatestFiniteMagnitude }
+        
+        var sum: Float = 0
+        let aBytes = [UInt8](a)
+        let bBytes = [UInt8](b)
+        
+        for i in 0..<min(aBytes.count, bBytes.count) {
+            let diff = Float(aBytes[i]) - Float(bBytes[i])
+            sum += diff * diff
+        }
+        
+        return sqrt(sum) / Float(aBytes.count)
+    }
+    
     func getTrainedNames() -> [String] {
-        return Array(Set(labels.values)).sorted()
+        return Array(Set(encodings.map { $0.label })).sorted()
     }
     
     func save() {
-        let labelData = labels.map { ["key": $0.key, "value": $0.value] }
-        UserDefaults.standard.set(labelData, forKey: "FaceLabels")
-        UserDefaults.standard.set(labelCounter, forKey: "FaceLabelCounter")
+        let data = encodings.map { ["data": $0.data, "label": $0.label] }
+        if let encoded = try? NSKeyedArchiver.archivedData(withRootObject: data, requiringSecureCoding: false) {
+            UserDefaults.standard.set(encoded, forKey: "FaceEncodings")
+        }
     }
     
     func load() {
-        guard let labelData = UserDefaults.standard.array(forKey: "FaceLabels") as? [[String: Any]] else { return }
-        for dict in labelData {
-            if let key = dict["key"] as? Int32, let value = dict["value"] as? String {
-                labels[key] = value
-            }
+        guard let data = UserDefaults.standard.data(forKey: "FaceEncodings"),
+              let decoded = try? NSKeyedUnarchiver.unarchivedArrayOfObjects(ofClass: NSDictionary.self, from: data) as? [[String: Any]] else { return }
+        encodings = decoded.compactMap { dict in
+            guard let data = dict["data"] as? Data, let label = dict["label"] as? String else { return nil }
+            return FaceEncoding(data: data, label: label)
         }
-        labelCounter = Int32(UserDefaults.standard.integer(forKey: "FaceLabelCounter"))
-        if !trainingImages.isEmpty {
-            train()
-        }
+        isTrained = !encodings.isEmpty
     }
     
     func clear() {
-        recognizer = createLBPHFaceRecognizer()
-        trainingImages = []
-        trainingLabels = []
-        labels = [:]
-        labelCounter = 0
+        encodings = []
         isTrained = false
-        UserDefaults.standard.removeObject(forKey: "FaceLabels")
-        UserDefaults.standard.removeObject(forKey: "FaceLabelCounter")
+        UserDefaults.standard.removeObject(forKey: "FaceEncodings")
     }
 }
 
@@ -456,10 +443,12 @@ struct TrainingModeView: View {
         
         DispatchQueue.global(qos: .userInitiated).async {
             for image in capturedImages {
-                cameraManager.faceClassifier?.addTrainingSample(image: image, label: newPersonName)
+                if let encoding = extractFaceEncoding(from: image) {
+                    cameraManager.faceClassifier?.addEncoding(encoding, label: newPersonName)
+                }
             }
             
-            cameraManager.faceClassifier?.train()
+            cameraManager.faceClassifier?.save()
             
             DispatchQueue.main.async {
                 isTraining = false
@@ -472,6 +461,26 @@ struct TrainingModeView: View {
                 }
             }
         }
+    }
+    
+    func extractFaceEncoding(from image: UIImage) -> Data? {
+        guard let cgImage = image.cgImage else { return nil }
+        
+        let request = VNGenerateImageFeaturePrintRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        
+        try? handler.perform([request])
+        
+        guard let result = request.results?.first as? VNFeaturePrintObservation else { return nil }
+        
+        var data = Data()
+        for i in 0..<128 {
+            var value: Float = 0
+            try? result.featurePrint(at: i, value: &value)
+            withUnsafeBytes(of: value) { data.append(contentsOf: $0) }
+        }
+        
+        return data
     }
 }
 
