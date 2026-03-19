@@ -206,7 +206,7 @@ struct FaceEmbedding: Codable {
 
 class FaceClassifier {
     private var embeddings: [FaceEmbedding] = []
-    private let minMatchConfidence: Float = 0.65
+    private let minMatchConfidence: Float = 0.75
     private let maxStoredFacesPerPerson = 20
     
     private var storageURL: URL {
@@ -262,42 +262,95 @@ class FaceClassifier {
             let bbox = observation.boundingBox
             features.append(Float(observation.confidence))
             
+            let leftEyeCenter = getCenter(of: landmarks.leftEye?.normalizedPoints ?? [])
+            let rightEyeCenter = getCenter(of: landmarks.rightEye?.normalizedPoints ?? [])
+            let noseCenter = getCenter(of: landmarks.nose?.normalizedPoints ?? [])
+            let mouthCenter = getCenter(of: landmarks.outerLips?.normalizedPoints ?? [])
+            
             if let leftEye = landmarks.leftEye {
                 features.append(contentsOf: normalizeLandmarkPoints(leftEye.normalizedPoints, bbox: bbox))
             } else {
-                features.append(contentsOf: [Float](repeating: 0, count: 6))
+                features.append(contentsOf: [Float](repeating: 0, count: 10))
             }
             
             if let rightEye = landmarks.rightEye {
                 features.append(contentsOf: normalizeLandmarkPoints(rightEye.normalizedPoints, bbox: bbox))
             } else {
-                features.append(contentsOf: [Float](repeating: 0, count: 6))
+                features.append(contentsOf: [Float](repeating: 0, count: 10))
             }
             
             if let nose = landmarks.nose {
                 features.append(contentsOf: normalizeLandmarkPoints(nose.normalizedPoints, bbox: bbox))
             } else {
-                features.append(contentsOf: [Float](repeating: 0, count: 6))
+                features.append(contentsOf: [Float](repeating: 0, count: 8))
             }
             
             if let outerLips = landmarks.outerLips {
                 features.append(contentsOf: normalizeLandmarkPoints(outerLips.normalizedPoints, bbox: bbox))
             } else {
-                features.append(contentsOf: [Float](repeating: 0, count: 12))
+                features.append(contentsOf: [Float](repeating: 0, count: 18))
+            }
+            
+            if let faceContour = landmarks.faceContour {
+                features.append(contentsOf: normalizeLandmarkPoints(faceContour.normalizedPoints, bbox: bbox))
+            } else {
+                features.append(contentsOf: [Float](repeating: 0, count: 34))
             }
             
             features.append(Float(bbox.width))
             features.append(Float(bbox.height))
             features.append(Float(bbox.width / bbox.height))
+            
+            let eyeDistance = distance(leftEyeCenter, rightEyeCenter)
+            let noseToMouth = distance(noseCenter, mouthCenter)
+            let faceWidth = bbox.width
+            let faceHeight = bbox.height
+            
+            features.append(Float(eyeDistance))
+            features.append(Float(noseToMouth))
+            features.append(Float(eyeDistance / faceWidth))
+            features.append(Float(noseToMouth / faceHeight))
+            features.append(Float(faceWidth / faceHeight))
+            
+            let leftEyeToNose = distance(leftEyeCenter, noseCenter)
+            let rightEyeToNose = distance(rightEyeCenter, noseCenter)
+            features.append(Float(leftEyeToNose / eyeDistance))
+            features.append(Float(rightEyeToNose / eyeDistance))
+            
+            let leftEyebrow = landmarks.leftEyebrow?.normalizedPoints ?? []
+            let rightEyebrow = landmarks.rightEyebrow?.normalizedPoints ?? []
+            if !leftEyebrow.isEmpty {
+                features.append(contentsOf: normalizeLandmarkPoints(leftEyebrow, bbox: bbox))
+            } else {
+                features.append(contentsOf: [Float](repeating: 0, count: 10))
+            }
+            if !rightEyebrow.isEmpty {
+                features.append(contentsOf: normalizeLandmarkPoints(rightEyebrow, bbox: bbox))
+            } else {
+                features.append(contentsOf: [Float](repeating: 0, count: 10))
+            }
         } else {
             return generateFallbackFeatures(from: cgImage)
         }
         
-        while features.count < 64 {
+        while features.count < 128 {
             features.append(0)
         }
         
-        return Array(features.prefix(64))
+        return Array(features.prefix(128))
+    }
+    
+    private func getCenter(of points: [CGPoint]) -> CGPoint {
+        guard !points.isEmpty else { return .zero }
+        let sumX = points.reduce(0) { $0 + $1.x }
+        let sumY = points.reduce(0) { $0 + $1.y }
+        return CGPoint(x: sumX / CGFloat(points.count), y: sumY / CGFloat(points.count))
+    }
+    
+    private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        return sqrt(dx * dx + dy * dy)
     }
     
     private func normalizeLandmarkPoints(_ points: [CGPoint], bbox: CGRect) -> [Float] {
@@ -316,7 +369,7 @@ class FaceClassifier {
         try? handler.perform([request])
         
         guard let face = request.results?.first else {
-            return [Float](repeating: 0, count: 64)
+            return [Float](repeating: 0, count: 128)
         }
         
         var features: [Float] = []
@@ -327,11 +380,11 @@ class FaceClassifier {
         features.append(Float(face.boundingBox.height))
         features.append(Float(face.boundingBox.width / face.boundingBox.height))
         
-        while features.count < 64 {
+        while features.count < 128 {
             features.append(Float.random(in: 0...0.05))
         }
         
-        return Array(features.prefix(64))
+        return Array(features.prefix(128))
     }
     
     func recognize(observation: VNFaceObservation, pixelBuffer: CVPixelBuffer) -> String? {
@@ -380,10 +433,10 @@ class FaceClassifier {
         features.append(Float(observation.boundingBox.width))
         features.append(Float(observation.boundingBox.height))
         features.append(Float(observation.boundingBox.width / observation.boundingBox.height))
-        while features.count < 64 {
+        while features.count < 128 {
             features.append(Float.random(in: 0...0.05))
         }
-        return Array(features.prefix(64))
+        return Array(features.prefix(128))
     }
     
     private func createCGImage(from pixelBuffer: CVPixelBuffer, cropRect: CGRect) -> CGImage? {
