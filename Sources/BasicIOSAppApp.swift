@@ -3,6 +3,7 @@ import AVFoundation
 import Vision
 import PhotosUI
 import CoreImage
+import ReplayKit
 
 struct CameraContainerView: View {
     @StateObject private var cameraManager = CameraManager()
@@ -76,36 +77,46 @@ struct CameraContainerView: View {
     
     func analyzeCurrentScreen() {
         isAnalyzingScreen = true
-        screenAnalysisText = ""
+        screenAnalysisText = "Capturing screen..."
         
-        guard let image = cameraManager.captureCurrentFrame() else {
-            isAnalyzingScreen = false
-            screenAnalysisText = "Could not capture screen"
-            showScreenAnalysisResult = true
-            return
+        let screenRecorder = ScreenRecorder.shared
+        
+        screenRecorder.startCapture { [weak self] image in
+            guard let self = self else { return }
+            
+            guard let capturedImage = image else {
+                self.isAnalyzingScreen = false
+                self.screenAnalysisText = "Could not capture screen. Make sure screen recording permission is enabled in Settings."
+                self.showScreenAnalysisResult = true
+                return
+            }
+            
+            guard let imageData = capturedImage.jpegData(compressionQuality: 0.5) else {
+                self.isAnalyzingScreen = false
+                self.screenAnalysisText = "Could not process image"
+                self.showScreenAnalysisResult = true
+                return
+            }
+            
+            let base64Image = imageData.base64EncodedString()
+            
+            let requestBody: [String: Any] = [
+                "model": "anthropic/claude-3-haiku-20240307",
+                "messages": [
+                    ["role": "system", "content": "You are Ray, Tony Stark's AI assistant. Analyze the user's screen and provide helpful commentary about what you see. Be witty, British, and concise."],
+                    ["role": "user", "content": [
+                        ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64Image)"]],
+                        ["type": "text", "text": "What do you see on this screen? Analyze its contents."]
+                    ]]
+                ],
+                "max_tokens": 200
+            ]
+            
+            self.sendAnalysisRequest(body: requestBody)
         }
-        
-        guard let imageData = image.jpegData(compressionQuality: 0.5) else {
-            isAnalyzingScreen = false
-            screenAnalysisText = "Could not process image"
-            showScreenAnalysisResult = true
-            return
-        }
-        
-        let base64Image = imageData.base64EncodedString()
-        
-        let requestBody: [String: Any] = [
-            "model": "anthropic/claude-3-haiku-20240307",
-            "messages": [
-                ["role": "system", "content": "You are Ray, Tony Stark's AI assistant. The user is pointing their phone camera at their screen. Analyze what you see and provide a brief, witty response about the content on the screen. Be British, concise, and helpful."],
-                ["role": "user", "content": [
-                    ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64Image)"]],
-                    ["type": "text", "text": "What do you see on this screen? Analyze its contents."]
-                ]]
-            ],
-            "max_tokens": 200
-        ]
-        
+    }
+    
+    func sendAnalysisRequest(body: [String: Any]) {
         guard let url = URL(string: "https://openrouter.ai/api/v1/chat/completions") else {
             isAnalyzingScreen = false
             screenAnalysisText = "Invalid URL"
@@ -422,6 +433,66 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         latestPixelBuffer = pixelBuffer
         processFrame(pixelBuffer)
+    }
+}
+
+class ScreenRecorder: NSObject, ObservableObject {
+    static let shared = ScreenRecorder()
+    
+    private let recorder = RPScreenRecorder.shared()
+    @Published var isRecording = false
+    @Published var lastFrame: UIImage?
+    private var frameTimer: Timer?
+    
+    override init() {
+        super.init()
+    }
+    
+    func startCapture(completion: @escaping (UIImage?) -> Void) {
+        guard recorder.isAvailable else {
+            completion(nil)
+            return
+        }
+        
+        recorder.startCapture { [weak self] sampleBuffer, bufferType, error in
+            guard let self = self,
+                  let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            
+            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            let context = CIContext()
+            if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
+                DispatchQueue.main.async {
+                    self.lastFrame = UIImage(cgImage: cgImage)
+                }
+            }
+        } completionHandler: { [weak self] error in
+            DispatchQueue.main.async {
+                if error == nil {
+                    self?.isRecording = true
+                    self?.captureFrame(completion: completion)
+                } else {
+                    completion(nil)
+                }
+            }
+        }
+    }
+    
+    func captureFrame(completion: @escaping (UIImage?) -> Void) {
+        if let frame = lastFrame {
+            completion(frame)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                completion(self?.lastFrame)
+            }
+        }
+    }
+    
+    func stopCapture() {
+        recorder.stopCapture { _ in
+            DispatchQueue.main.async {
+                self.isRecording = false
+            }
+        }
     }
 }
 
