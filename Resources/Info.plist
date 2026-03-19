@@ -21,7 +21,9 @@
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>NSCameraUsageDescription</key>
-    <string>Camera access is required to show the camera feed.</string>
+    <string>Camera access is required to show the camera feed and capture training photos.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Photo library access is required to select training images.</string>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

@@ -2,6 +2,8 @@ import SwiftUI
 import AVFoundation
 import Vision
 import PhotosUI
+import CoreImage
+import SQLite
 
 struct CameraContainerView: View {
     @StateObject private var cameraManager = CameraManager()
@@ -53,6 +55,7 @@ struct FaceTarget: Identifiable {
     var rect: CGRect
     var confidence: Float = 1.0
     var recognizedName: String? = nil
+    var faceId: Int? = nil
 }
 
 class CameraManager: NSObject, ObservableObject {
@@ -67,10 +70,8 @@ class CameraManager: NSObject, ObservableObject {
     var onFacesDetected: (([FaceTarget]) -> Void)?
     
     private var sequenceHandler: VNSequenceRequestHandler?
-    private var isTracking = false
-    private var trackedObservations: [VNDetectedObjectObservation] = []
     private var frameCount = 0
-    private let detectEveryNFrames = 5
+    private let detectEveryNFrames = 3
     
     var faceClassifier: FaceClassifier?
     
@@ -113,8 +114,6 @@ class CameraManager: NSObject, ObservableObject {
         captureSession.commitConfiguration()
         isFrontCamera = (position == .front)
         isReady = true
-        isTracking = false
-        trackedObservations = []
         
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             if self?.captureSession.isRunning == false {
@@ -165,65 +164,34 @@ class CameraManager: NSObject, ObservableObject {
         guard let handler = sequenceHandler else { return }
         
         frameCount += 1
+        guard frameCount % detectEveryNFrames == 0 else { return }
         
-        if frameCount % detectEveryNFrames == 0 || !isTracking || trackedObservations.isEmpty {
-            let detectRequest = VNDetectFaceRectanglesRequest { [weak self] request, error in
-                guard error == nil else { return }
-                guard let results = request.results as? [VNFaceObservation] else {
-                    self?.isTracking = false
-                    self?.trackedObservations = []
-                    return
-                }
-                
-                if !results.isEmpty {
-                    self?.trackedObservations = results.map { $0 }
-                    self?.isTracking = true
-                } else {
-                    self?.isTracking = false
-                }
+        let detectRectangles = VNDetectFaceRectanglesRequest()
+        let detectLandmarks = VNDetectFaceLandmarksRequest()
+        
+        try? handler.perform([detectRectangles, detectLandmarks], on: pixelBuffer)
+        
+        guard let rectangles = detectRectangles.results, !rectangles.isEmpty else {
+            DispatchQueue.main.async { [weak self] in
+                self?.onFacesDetected?([])
             }
-            
-            try? handler.perform([detectRequest], on: pixelBuffer)
-        } else if isTracking && !trackedObservations.isEmpty {
-            let trackRequest = VNTrackObjectRequest(detectedObjectObservation: trackedObservations.first!)
-            try? handler.perform([trackRequest], on: pixelBuffer)
-            
-            if let result = trackRequest.results?.first as? VNDetectedObjectObservation {
-                trackedObservations = [result]
-            } else {
-                isTracking = false
-            }
+            return
         }
         
-        let faceEncoding = extractEncoding(from: pixelBuffer)
-        
-        var faceTargets = trackedObservations.map { observation -> FaceTarget in
-            var target = FaceTarget(rect: observation.boundingBox)
-            if let encoding = faceEncoding, let name = faceClassifier?.recognize(encoding: encoding) {
-                target.recognizedName = name
-            }
-            return target
+        let faceTargets: [FaceTarget] = rectangles.compactMap { observation -> FaceTarget? in
+            let landmarks = detectLandmarks.results?.first { $0.uuid == observation.uuid }
+            let name = faceClassifier?.recognize(observation: observation, pixelBuffer: pixelBuffer)
+            return FaceTarget(
+                rect: observation.boundingBox,
+                confidence: observation.confidence,
+                recognizedName: name,
+                faceId: Int(observation.trackingNumber)
+            )
         }
         
-        onFacesDetected?(faceTargets)
-    }
-    
-    private func extractEncoding(from pixelBuffer: CVPixelBuffer) -> Data? {
-        let request = VNGenerateImageFeaturePrintRequest()
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
-        
-        try? handler.perform([request])
-        
-        guard let result = request.results?.first as? VNFeaturePrintObservation else { return nil }
-        
-        var data = Data()
-        for i in 0..<128 {
-            var value: Float = 0
-            try? result.featurePrint(at: i, value: &value)
-            withUnsafeBytes(of: value) { data.append(contentsOf: $0) }
+        DispatchQueue.main.async { [weak self] in
+            self?.onFacesDetected?(faceTargets)
         }
-        
-        return data
     }
 }
 
@@ -235,77 +203,247 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 }
 
 class FaceClassifier {
-    struct FaceEncoding {
-        var data: Data
-        var label: String
+    private var db: Connection?
+    private let embeddings = Table("embeddings")
+    private let id = Expression<Int64>("id")
+    private let name = Expression<String>("name")
+    private let featureData = Expression<Data>("features")
+    private let createdAt = Expression<Date>("created_at")
+    
+    private let minMatchConfidence: Float = 0.65
+    private let maxStoredFacesPerPerson = 20
+    
+    init() {}
+    
+    func load() {
+        do {
+            let path = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("face_embeddings.sqlite3").path
+            db = try Connection(path)
+            try db?.run(embeddings.create(ifNotExists: true) { t in
+                t.column(id, primaryKey: .autoincrement)
+                t.column(name)
+                t.column(featureData)
+                t.column(createdAt)
+            })
+        } catch {
+            print("Database error: \(error)")
+        }
     }
     
-    private var encodings: [FaceEncoding] = []
-    private var isTrained = false
-    
-    func addEncoding(_ data: Data, label: String) {
-        encodings.append(FaceEncoding(data: data, label: label))
-        isTrained = true
+    func train(name: String, images: [UIImage]) {
+        for image in images {
+            guard let cgImage = image.cgImage else { continue }
+            let featureVector = extractFeatures(from: cgImage)
+            saveEmbedding(name: name, features: featureVector)
+        }
     }
     
-    func recognize(encoding: Data) -> String? {
-        guard isTrained, !encodings.isEmpty else { return nil }
+    func train(cgImage: CGImage, personName: String) {
+        let features = extractFeatures(from: cgImage)
+        saveEmbedding(name: personName, features: features)
+    }
+    
+    private func extractFeatures(from cgImage: CGImage) -> [Float] {
+        var features: [Float] = []
         
-        var bestMatch: (label: String, distance: Float) = (label: "", distance: Float.greatestFiniteMagnitude)
+        let request = VNDetectFaceLandmarksRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        try? handler.perform([request])
         
-        for sample in encodings {
-            let distance = compareEncodings(encoding, sample.data)
-            if distance < bestMatch.distance && distance < 0.6 {
-                bestMatch = (label: sample.label, distance: distance)
+        guard let observation = request.results?.first else {
+            return generateFallbackFeatures(from: cgImage)
+        }
+        
+        if let landmarks = observation.landmarks {
+            let bbox = observation.boundingBox
+            features.append(Float(observation.confidence))
+            
+            if let leftEye = landmarks.leftEye {
+                let pts = normalizeLandmarkPoints(leftEye.normalizedPoints, bbox: bbox)
+                features.append(contentsOf: pts)
+            } else {
+                features.append(contentsOf: [Float](repeating: 0, count: 6))
+            }
+            
+            if let rightEye = landmarks.rightEye {
+                let pts = normalizeLandmarkPoints(rightEye.normalizedPoints, bbox: bbox)
+                features.append(contentsOf: pts)
+            } else {
+                features.append(contentsOf: [Float](repeating: 0, count: 6))
+            }
+            
+            if let nose = landmarks.nose {
+                let pts = normalizeLandmarkPoints(nose.normalizedPoints, bbox: bbox)
+                features.append(contentsOf: pts)
+            } else {
+                features.append(contentsOf: [Float](repeating: 0, count: 6))
+            }
+            
+            if let outerLips = landmarks.outerLips {
+                let pts = normalizeLandmarkPoints(outerLips.normalizedPoints, bbox: bbox)
+                features.append(contentsOf: pts)
+            } else {
+                features.append(contentsOf: [Float](repeating: 0, count: 12))
+            }
+            
+            features.append(Float(bbox.width))
+            features.append(Float(bbox.height))
+            features.append(Float(bbox.width / bbox.height))
+        } else {
+            return generateFallbackFeatures(from: cgImage)
+        }
+        
+        while features.count < 64 {
+            features.append(0)
+        }
+        
+        return Array(features.prefix(64))
+    }
+    
+    private func normalizeLandmarkPoints(_ points: [CGPoint], bbox: CGRect) -> [Float] {
+        return points.flatMap { pt -> [Float] in
+            let x = Float((pt.x - bbox.origin.x) / bbox.width)
+            let y = Float((pt.y - bbox.origin.y) / bbox.height)
+            return [x, y]
+        }
+    }
+    
+    private func generateFallbackFeatures(from cgImage: CGImage) -> [Float] {
+        let ciImage = CIImage(cgImage: cgImage)
+        let handler = VNImageRequestHandler(ciImage: ciImage, options: [:])
+        
+        let request = VNDetectFaceRectanglesRequest()
+        try? handler.perform([request])
+        
+        guard let face = request.results?.first else {
+            return [Float](repeating: 0, count: 64)
+        }
+        
+        var features: [Float] = []
+        features.append(Float(face.confidence))
+        features.append(Float(face.boundingBox.origin.x))
+        features.append(Float(face.boundingBox.origin.y))
+        features.append(Float(face.boundingBox.width))
+        features.append(Float(face.boundingBox.height))
+        features.append(Float(face.boundingBox.width / face.boundingBox.height))
+        
+        while features.count < 64 {
+            let random = Float.random(in: 0...1)
+            features.append(random * 0.1)
+        }
+        
+        return Array(features.prefix(64))
+    }
+    
+    private func saveEmbedding(name: String, features: [Float]) {
+        guard let db = db else { return }
+        
+        let count = try? db.scalar(embeddings.filter(self.name == name).count) ?? 0
+        if count ?? 0 >= maxStoredFacesPerPerson {
+            if let oldest = try? db.pluck(embeddings.filter(self.name == name).order(createdAt.asc).limit(1)) {
+                try? db.run(embeddings.filter(id == oldest[id]).delete())
             }
         }
         
-        if bestMatch.distance < 0.6 {
-            return bestMatch.label
-        }
-        return nil
+        let data = features.withUnsafeBytes { Data($0) }
+        try? db.run(embeddings.insert(self.name <- name, featureData <- data, createdAt <- Date()))
     }
     
-    private func compareEncodings(_ a: Data, _ b: Data) -> Float {
-        guard a.count == b.count else { return Float.greatestFiniteMagnitude }
+    func recognize(observation: VNFaceObservation, pixelBuffer: CVPixelBuffer) -> String? {
+        guard let db = db else { return nil }
         
-        var sum: Float = 0
-        let aBytes = [UInt8](a)
-        let bBytes = [UInt8](b)
+        let features = extractFeaturesFromObservation(observation, pixelBuffer: pixelBuffer)
+        guard !features.isEmpty else { return nil }
         
-        for i in 0..<min(aBytes.count, bBytes.count) {
-            let diff = Float(aBytes[i]) - Float(bBytes[i])
-            sum += diff * diff
+        var bestMatch: (name: String, similarity: Float) = ("UNKNOWN", 0)
+        
+        for row in try! db.prepare(embeddings) {
+            let storedFeatures = [Float](repeating: 0, count: 64)
+            let storedData = row[featureData]
+            var storedArray = [Float](repeating: 0, count: min(storedData.count / 4, 64))
+            _ = storedArray.withUnsafeMutableBytes { storedData.copyBytes(to: $0) }
+            
+            let similarity = cosineSimilarity(features, storedArray)
+            
+            if similarity > minMatchConfidence && similarity > bestMatch.similarity {
+                bestMatch = (row[name], similarity)
+            }
         }
         
-        return sqrt(sum) / Float(aBytes.count)
+        return bestMatch.similarity > minMatchConfidence ? bestMatch.name : nil
+    }
+    
+    private func extractFeaturesFromObservation(_ observation: VNFaceObservation, pixelBuffer: CVPixelBuffer) -> [Float] {
+        let bbox = observation.boundingBox
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        
+        let cropX = Int(bbox.origin.x * CGFloat(width))
+        let cropY = Int((1 - bbox.origin.y - bbox.height) * CGFloat(height))
+        let cropWidth = Int(bbox.width * CGFloat(width))
+        let cropHeight = Int(bbox.height * CGFloat(height))
+        
+        let cropRect = CGRect(x: max(0, cropX - cropWidth/4),
+                              y: max(0, cropY - cropHeight/4),
+                              width: min(cropWidth * 2, width - cropX + cropWidth/4),
+                              height: min(cropHeight * 2, height - cropY + cropHeight/4))
+        
+        guard let cgImage = createCGImage(from: pixelBuffer, cropRect: cropRect) else {
+            return generateFallbackFromBBox(observation)
+        }
+        
+        return extractFeatures(from: cgImage)
+    }
+    
+    private func generateFallbackFromBBox(_ observation: VNFaceObservation) -> [Float] {
+        var features: [Float] = []
+        features.append(Float(observation.confidence))
+        features.append(Float(observation.boundingBox.origin.x))
+        features.append(Float(observation.boundingBox.origin.y))
+        features.append(Float(observation.boundingBox.width))
+        features.append(Float(observation.boundingBox.height))
+        features.append(Float(observation.boundingBox.width / observation.boundingBox.height))
+        while features.count < 64 {
+            features.append(Float.random(in: 0...0.05))
+        }
+        return Array(features.prefix(64))
+    }
+    
+    private func createCGImage(from pixelBuffer: CVPixelBuffer, cropRect: CGRect) -> CGImage? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer).cropped(to: cropRect)
+        let context = CIContext()
+        return context.createCGImage(ciImage, from: ciImage.extent)
+    }
+    
+    private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
+        var dotProduct: Float = 0
+        var normA: Float = 0
+        var normB: Float = 0
+        
+        for i in 0..<min(a.count, b.count) {
+            dotProduct += a[i] * b[i]
+            normA += a[i] * a[i]
+            normB += b[i] * b[i]
+        }
+        
+        let denominator = sqrt(normA) * sqrt(normB)
+        guard denominator > 0 else { return 0 }
+        
+        return dotProduct / denominator
     }
     
     func getTrainedNames() -> [String] {
-        return Array(Set(encodings.map { $0.label })).sorted()
-    }
-    
-    func save() {
-        let data = encodings.map { ["data": $0.data, "label": $0.label] }
-        if let encoded = try? NSKeyedArchiver.archivedData(withRootObject: data, requiringSecureCoding: false) {
-            UserDefaults.standard.set(encoded, forKey: "FaceEncodings")
+        guard let db = db else { return [] }
+        var names: Set<String> = []
+        for row in try! db.prepare(embeddings.select(name)) {
+            names.insert(row[name])
         }
-    }
-    
-    func load() {
-        guard let data = UserDefaults.standard.data(forKey: "FaceEncodings"),
-              let decoded = try? NSKeyedUnarchiver.unarchivedArrayOfObjects(ofClass: NSDictionary.self, from: data) as? [[String: Any]] else { return }
-        encodings = decoded.compactMap { dict in
-            guard let data = dict["data"] as? Data, let label = dict["label"] as? String else { return nil }
-            return FaceEncoding(data: data, label: label)
-        }
-        isTrained = !encodings.isEmpty
+        return Array(names).sorted()
     }
     
     func clear() {
-        encodings = []
-        isTrained = false
-        UserDefaults.standard.removeObject(forKey: "FaceEncodings")
+        try? db?.run(embeddings.delete())
     }
 }
 
@@ -319,6 +457,7 @@ struct TrainingModeView: View {
     @State private var trainingComplete = false
     @State private var trainedPeople: [String] = []
     @State private var showClearAlert = false
+    @State private var showCameraCapture = false
     
     var body: some View {
         VStack {
@@ -354,31 +493,60 @@ struct TrainingModeView: View {
                 .textFieldStyle(RoundedBorderTextFieldStyle())
                 .padding(.horizontal, 40)
             
-            Button(action: { showImagePicker = true }) {
-                HStack {
-                    Image(systemName: "photo.on.rectangle.angled")
-                    Text("Select Photos")
+            HStack(spacing: 20) {
+                Button(action: { showImagePicker = true }) {
+                    VStack {
+                        Image(systemName: "photo.on.rectangle.angled")
+                            .font(.system(size: 30))
+                        Text("Gallery")
+                            .font(.caption)
+                    }
+                    .padding()
+                    .background(Color(red: 0.0, green: 0.6, blue: 0.8))
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
                 }
-                .padding()
-                .background(Color(red: 0.0, green: 0.6, blue: 0.8))
-                .foregroundColor(.white)
-                .cornerRadius(10)
+                
+                Button(action: { showCameraCapture = true }) {
+                    VStack {
+                        Image(systemName: "camera")
+                            .font(.system(size: 30))
+                        Text("Capture")
+                            .font(.caption)
+                    }
+                    .padding()
+                    .background(Color(red: 0.0, green: 0.6, blue: 0.8))
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
             }
-            .padding()
+            .padding(.horizontal, 40)
             
             if !capturedImages.isEmpty {
                 Text("\(capturedImages.count) photos selected")
                     .foregroundColor(.green)
                     .padding(.vertical, 5)
                 
-                HStack {
-                    ForEach(0..<min(capturedImages.count, 4), id: \.self) { i in
-                        Image(uiImage: capturedImages[i])
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 60, height: 60)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack {
+                        ForEach(0..<capturedImages.count, id: \.self) { i in
+                            Image(uiImage: capturedImages[i])
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 60, height: 60)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .overlay(
+                                    Button(action: {
+                                        capturedImages.remove(at: i)
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.red)
+                                    }
+                                    .offset(x: 25, y: -25)
+                                )
+                        }
                     }
+                    .padding(.horizontal)
                 }
                 .padding(.vertical, 5)
                 
@@ -409,10 +577,16 @@ struct TrainingModeView: View {
                     Text("Trained People:")
                         .foregroundColor(.white)
                         .padding(.horizontal)
-                    ForEach(trainedPeople, id: \.self) { name in
-                        Text("• \(name)")
-                            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
-                            .padding(.horizontal)
+                    ForEach(trainedPeople, id: \.self) { person in
+                        HStack {
+                            Text("• \(person)")
+                                .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                            Spacer()
+                            Text("\(getFaceCount(for: person)) faces")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                        .padding(.horizontal)
                     }
                 }
                 .padding(.top)
@@ -423,6 +597,9 @@ struct TrainingModeView: View {
         .background(Color.black.opacity(0.9))
         .sheet(isPresented: $showImagePicker) {
             ImagePicker(images: $capturedImages)
+        }
+        .sheet(isPresented: $showCameraCapture) {
+            CameraCaptureView(capturedImages: $capturedImages)
         }
         .alert("Clear All Training?", isPresented: $showClearAlert) {
             Button("Cancel", role: .cancel) {}
@@ -443,17 +620,16 @@ struct TrainingModeView: View {
         
         DispatchQueue.global(qos: .userInitiated).async {
             for image in capturedImages {
-                if let encoding = extractFaceEncoding(from: image) {
-                    cameraManager.faceClassifier?.addEncoding(encoding, label: newPersonName)
+                if let cgImage = image.cgImage {
+                    cameraManager.faceClassifier?.train(cgImage: cgImage, personName: newPersonName)
                 }
             }
-            
-            cameraManager.faceClassifier?.save()
             
             DispatchQueue.main.async {
                 isTraining = false
                 trainingComplete = true
                 capturedImages = []
+                newPersonName = ""
                 trainedPeople = cameraManager.faceClassifier?.getTrainedNames() ?? []
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
@@ -463,24 +639,47 @@ struct TrainingModeView: View {
         }
     }
     
-    func extractFaceEncoding(from image: UIImage) -> Data? {
-        guard let cgImage = image.cgImage else { return nil }
+    func getFaceCount(for person: String) -> Int {
+        return trainedPeople.filter { $0 == person }.count
+    }
+}
+
+struct CameraCaptureView: UIViewControllerRepresentable {
+    @Binding var capturedImages: [UIImage]
+    @Environment(\.presentationMode) var presentationMode
+    
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = context.coordinator
+        return picker
+    }
+    
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let parent: CameraCaptureView
         
-        let request = VNGenerateImageFeaturePrintRequest()
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        
-        try? handler.perform([request])
-        
-        guard let result = request.results?.first as? VNFeaturePrintObservation else { return nil }
-        
-        var data = Data()
-        for i in 0..<128 {
-            var value: Float = 0
-            try? result.featurePrint(at: i, value: &value)
-            withUnsafeBytes(of: value) { data.append(contentsOf: $0) }
+        init(_ parent: CameraCaptureView) {
+            self.parent = parent
         }
         
-        return data
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            if let image = info[.originalImage] as? UIImage {
+                DispatchQueue.main.async {
+                    self.parent.capturedImages.append(image)
+                }
+            }
+            parent.presentationMode.wrappedValue.dismiss()
+        }
+        
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.presentationMode.wrappedValue.dismiss()
+        }
     }
 }
 
