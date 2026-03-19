@@ -1744,8 +1744,8 @@ class OpenRouterClient {
             return
         }
         
-        let screenshotsDir = "/var/mobile/Library/JARVIS/screenshots"
-        let contextPath = "/var/mobile/Library/JARVIS/context/current.txt"
+        let screenshotsDir = "/var/jb/var/mobile/Library/JARVIS/screenshots"
+        let contextPath = "/var/jb/var/mobile/Library/JARVIS/context/current.txt"
         
         guard let screenshots = try? FileManager.default.contentsOfDirectory(atPath: screenshotsDir) as [String],
               let latestFile = screenshots.sorted().last else {
