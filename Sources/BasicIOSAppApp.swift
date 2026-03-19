@@ -556,13 +556,10 @@ class CameraPreviewUIView: UIView {
         cornerLayers.removeAll()
         nameLabels.removeAll()
         
-        let orientation = UIApplication.shared.windows.first?.windowScene?.interfaceOrientation ?? .portrait
-        
         for face in faces {
-            let screenCoords = transformFaceRect(face.rect, bounds: bounds, orientation: orientation)
-            let centerX = screenCoords.x
-            let centerY = screenCoords.y
-            let size = screenCoords.size
+            let centerX = face.rect.midX * bounds.width
+            let centerY = (1 - face.rect.midY) * bounds.height
+            let size = max(face.rect.width, face.rect.height) * bounds.width
             
             let outerRadius = size / 2 + 8
             let innerRadius = size / 2 - 3
@@ -647,23 +644,6 @@ class CameraPreviewUIView: UIView {
                 layer.addSublayer(nameLayer)
                 nameLabels.append(nameLayer)
             }
-        }
-    }
-    
-    private func transformFaceRect(_ rect: CGRect, bounds: CGRect, orientation: UIInterfaceOrientation) -> (x: CGFloat, y: CGFloat, size: CGFloat) {
-        let x = rect.midX * bounds.width
-        let y = (1 - rect.midY) * bounds.height
-        let size = max(rect.width, rect.height) * bounds.width
-        
-        switch orientation {
-        case .landscapeLeft:
-            return (x: bounds.height - y, y: x, size: size)
-        case .landscapeRight:
-            return (x: y, y: bounds.width - x, size: size)
-        case .portraitUpsideDown:
-            return (x: bounds.width - x, y: bounds.height - y, size: size)
-        default:
-            return (x: x, y: y, size: size)
         }
     }
 }
