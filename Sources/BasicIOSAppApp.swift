@@ -1561,9 +1561,6 @@ class OpenRouterClient {
             ],
             "max_tokens": 200
         ]
-            ],
-            "max_tokens": 200
-        ]
         
         guard let url = URL(string: "https://openrouter.ai/api/v1/chat/completions") else {
             completion("Invalid URL")
