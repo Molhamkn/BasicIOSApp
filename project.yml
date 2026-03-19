@@ -1,10 +1,6 @@
 name: BasicIOSApp
 options:
   bundleIdPrefix: com.example
-packages:
-  SQLite.swift:
-    url: https://github.com/stephencelis/SQLite.swift
-    from: "0.15.0"
 targets:
   BasicIOSApp:
     type: application
@@ -13,9 +9,6 @@ targets:
       - Sources
     resources:
       - Resources
-    dependencies:
-      - package: SQLite.swift
-        product: SQLite
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.BasicIOSApp

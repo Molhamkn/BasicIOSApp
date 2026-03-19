@@ -3,9 +3,8 @@ import AVFoundation
 import Vision
 import PhotosUI
 import CoreImage
-import SQLite
 
-struct CameraContainerView: SwiftUI.View {
+struct CameraContainerView: View {
     @StateObject private var cameraManager = CameraManager()
     @State private var showCameraSwitcher = false
     @State private var baseZoom: CGFloat = 1.0
@@ -55,7 +54,6 @@ struct FaceTarget: Identifiable {
     var rect: CGRect
     var confidence: Float = 1.0
     var recognizedName: String? = nil
-    var faceId: Int? = nil
 }
 
 class CameraManager: NSObject, ObservableObject {
@@ -183,8 +181,7 @@ class CameraManager: NSObject, ObservableObject {
             return FaceTarget(
                 rect: observation.boundingBox,
                 confidence: observation.confidence,
-                recognizedName: name,
-                faceId: nil
+                recognizedName: name
             )
         }
         
@@ -201,46 +198,53 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 }
 
+struct FaceEmbedding: Codable {
+    let name: String
+    let features: [Float]
+    let createdAt: Date
+}
+
 class FaceClassifier {
-    private var db: SQLite.Connection?
-    private let embeddings = Table("embeddings")
-    private let idCol = SQLite.Expression<Int64>("id")
-    private let nameCol = SQLite.Expression<String>("name")
-    private let featureData = SQLite.Expression<Data>("features")
-    private let createdAt = SQLite.Expression<Date>("created_at")
-    
+    private var embeddings: [FaceEmbedding] = []
     private let minMatchConfidence: Float = 0.65
     private let maxStoredFacesPerPerson = 20
     
-    init() {}
+    private var storageURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("face_embeddings.json")
+    }
     
     func load() {
         do {
-            let path = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("face_embeddings.sqlite3").path
-            db = try SQLite.Connection(path)
-            try db?.run(embeddings.create(ifNotExists: true) { t in
-                t.column(idCol, primaryKey: .autoincrement)
-                t.column(nameCol)
-                t.column(featureData)
-                t.column(createdAt)
-            })
+            let data = try Data(contentsOf: storageURL)
+            embeddings = try JSONDecoder().decode([FaceEmbedding].self, from: data)
         } catch {
-            print("Database error: \(error)")
+            embeddings = []
         }
     }
     
-    func train(name: String, images: [UIImage]) {
-        for image in images {
-            guard let cgImage = image.cgImage else { continue }
-            let featureVector = extractFeatures(from: cgImage)
-            saveEmbedding(name: name, features: featureVector)
+    private func save() {
+        do {
+            let data = try JSONEncoder().encode(embeddings)
+            try data.write(to: storageURL)
+        } catch {
+            print("Save error: \(error)")
         }
     }
     
     func train(cgImage: CGImage, personName: String) {
         let features = extractFeatures(from: cgImage)
-        saveEmbedding(name: personName, features: features)
+        let embedding = FaceEmbedding(name: personName, features: features, createdAt: Date())
+        embeddings.append(embedding)
+        
+        let count = embeddings.filter { $0.name == personName }.count
+        if count > maxStoredFacesPerPerson {
+            if let oldestIndex = embeddings.firstIndex(where: { $0.name == personName }) {
+                embeddings.remove(at: oldestIndex)
+            }
+        }
+        
+        save()
     }
     
     private func extractFeatures(from cgImage: CGImage) -> [Float] {
@@ -259,29 +263,25 @@ class FaceClassifier {
             features.append(Float(observation.confidence))
             
             if let leftEye = landmarks.leftEye {
-                let pts = normalizeLandmarkPoints(leftEye.normalizedPoints, bbox: bbox)
-                features.append(contentsOf: pts)
+                features.append(contentsOf: normalizeLandmarkPoints(leftEye.normalizedPoints, bbox: bbox))
             } else {
                 features.append(contentsOf: [Float](repeating: 0, count: 6))
             }
             
             if let rightEye = landmarks.rightEye {
-                let pts = normalizeLandmarkPoints(rightEye.normalizedPoints, bbox: bbox)
-                features.append(contentsOf: pts)
+                features.append(contentsOf: normalizeLandmarkPoints(rightEye.normalizedPoints, bbox: bbox))
             } else {
                 features.append(contentsOf: [Float](repeating: 0, count: 6))
             }
             
             if let nose = landmarks.nose {
-                let pts = normalizeLandmarkPoints(nose.normalizedPoints, bbox: bbox)
-                features.append(contentsOf: pts)
+                features.append(contentsOf: normalizeLandmarkPoints(nose.normalizedPoints, bbox: bbox))
             } else {
                 features.append(contentsOf: [Float](repeating: 0, count: 6))
             }
             
             if let outerLips = landmarks.outerLips {
-                let pts = normalizeLandmarkPoints(outerLips.normalizedPoints, bbox: bbox)
-                features.append(contentsOf: pts)
+                features.append(contentsOf: normalizeLandmarkPoints(outerLips.normalizedPoints, bbox: bbox))
             } else {
                 features.append(contentsOf: [Float](repeating: 0, count: 12))
             }
@@ -328,44 +328,22 @@ class FaceClassifier {
         features.append(Float(face.boundingBox.width / face.boundingBox.height))
         
         while features.count < 64 {
-            let random = Float.random(in: 0...1)
-            features.append(random * 0.1)
+            features.append(Float.random(in: 0...0.05))
         }
         
         return Array(features.prefix(64))
     }
     
-    private func saveEmbedding(name: String, features: [Float]) {
-        guard let db = db else { return }
-        
-        let count = try? db.scalar(embeddings.filter(nameCol == name).count) ?? 0
-        if count ?? 0 >= maxStoredFacesPerPerson {
-            if let oldest = try? db.pluck(embeddings.filter(nameCol == name).order(createdAt.asc).limit(1)) {
-                try? db.run(embeddings.filter(idCol == oldest[idCol]).delete())
-            }
-        }
-        
-        let data = features.withUnsafeBytes { Data($0) }
-        try? db.run(embeddings.insert(nameCol <- name, featureData <- data, createdAt <- Date()))
-    }
-    
     func recognize(observation: VNFaceObservation, pixelBuffer: CVPixelBuffer) -> String? {
-        guard let db = db else { return nil }
-        
         let features = extractFeaturesFromObservation(observation, pixelBuffer: pixelBuffer)
         guard !features.isEmpty else { return nil }
         
-        var bestMatch: (name: String, similarity: Float) = ("UNKNOWN", 0)
+        var bestMatch: (name: String, similarity: Float) = ("", 0)
         
-        for row in try! db.prepare(embeddings) {
-            let storedData = row[featureData]
-            var storedArray = [Float](repeating: 0, count: min(storedData.count / 4, 64))
-            _ = storedArray.withUnsafeMutableBytes { storedData.copyBytes(to: $0) }
-            
-            let similarity = cosineSimilarity(features, storedArray)
-            
+        for embedding in embeddings {
+            let similarity = cosineSimilarity(features, embedding.features)
             if similarity > minMatchConfidence && similarity > bestMatch.similarity {
-                bestMatch = (row[nameCol], similarity)
+                bestMatch = (embedding.name, similarity)
             }
         }
         
@@ -432,20 +410,20 @@ class FaceClassifier {
     }
     
     func getTrainedNames() -> [String] {
-        guard let db = db else { return [] }
         var names: Set<String> = []
-        for row in try! db.prepare(embeddings.select(nameCol)) {
-            names.insert(row[nameCol])
+        for embedding in embeddings {
+            names.insert(embedding.name)
         }
         return Array(names).sorted()
     }
     
     func clear() {
-        try? db?.run(embeddings.delete())
+        embeddings = []
+        save()
     }
 }
 
-struct TrainingModeView: SwiftUI.View {
+struct TrainingModeView: View {
     @ObservedObject var cameraManager: CameraManager
     @Binding var showTrainingMode: Bool
     @State private var newPersonName = ""
@@ -580,9 +558,6 @@ struct TrainingModeView: SwiftUI.View {
                             Text("• \(person)")
                                 .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
                             Spacer()
-                            Text("\(trainedPeople.filter { $0 == person }.count) faces")
-                                .font(.caption)
-                                .foregroundColor(.gray)
                         }
                         .padding(.horizontal)
                     }
@@ -868,12 +843,12 @@ class CameraPreviewUIView: UIView {
     }
 }
 
-struct IronManHUD: SwiftUI.View {
+struct IronManHUD: View {
     let currentZoom: CGFloat
     @Binding var showCameraSwitcher: Bool
     let cameraManager: CameraManager
     var faceCount: Int = 0
-    var showTrainingMode: SwiftUI.Binding<Bool>? = nil
+    var showTrainingMode: Binding<Bool>? = nil
     
     var body: some View {
         VStack {
@@ -917,7 +892,7 @@ struct IronManHUD: SwiftUI.View {
     }
 }
 
-struct TargetCounter: SwiftUI.View {
+struct TargetCounter: View {
     let count: Int
     @State private var pulse = false
     
@@ -939,7 +914,7 @@ struct TargetCounter: SwiftUI.View {
     }
 }
 
-struct TimeDisplay: SwiftUI.View {
+struct TimeDisplay: View {
     @State private var currentTime = Date()
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     
@@ -960,7 +935,7 @@ struct TimeDisplay: SwiftUI.View {
     }
 }
 
-struct ZoomIndicator: SwiftUI.View {
+struct ZoomIndicator: View {
     let zoom: CGFloat
     
     var body: some View {
@@ -971,14 +946,14 @@ struct ZoomIndicator: SwiftUI.View {
     }
 }
 
-struct CameraSwitchButton: SwiftUI.View {
+struct CameraSwitchButton: View {
     let cameraManager: CameraManager
-    let showCameraSwitcher: SwiftUI.Binding<Bool>
+    @Binding var showCameraSwitcher: Bool
     
     var body: some View {
         Button(action: {
             cameraManager.switchCamera()
-            showCameraSwitcher.wrappedValue = false
+            showCameraSwitcher = false
         }) {
             Image(systemName: "camera.rotate")
                 .font(.system(size: 24))
