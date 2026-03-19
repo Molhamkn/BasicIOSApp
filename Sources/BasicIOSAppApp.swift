@@ -71,7 +71,7 @@ class CameraManager: NSObject, ObservableObject {
     private var trackedFaces: [(id: Int, observation: VNFaceObservation, name: String?)] = []
     private var nextFaceId = 0
     private var frameCount = 0
-    private let detectEveryNFrames = 2
+    private let detectEveryNFrames = 1
     
     var faceClassifier: FaceClassifier?
     
@@ -839,10 +839,8 @@ class CameraPreviewUIView: UIView {
     private var cornerLayers: [CAShapeLayer] = []
     private var nameLabels: [CATextLayer] = []
     
-    private var targetRects: [Int: (rect: CGRect, name: String)] = [:]
     private var displayRects: [Int: (rect: CGRect, name: String, alpha: CGFloat)] = [:]
-    private let smoothing: CGFloat = 0.15
-    private let fadeSpeed: CGFloat = 0.08
+    private let fadeSpeed: CGFloat = 0.15
     
     private var displayLink: CADisplayLink?
     
@@ -865,39 +863,33 @@ class CameraPreviewUIView: UIView {
     @objc private func updateAnimation() {
         var needsUpdate = false
         
-        for id in displayRects.keys {
-            if let target = targetRects[id] {
-                let current = displayRects[id]!
-                
-                let newRect = CGRect(
-                    x: current.rect.origin.x + (target.rect.origin.x - current.rect.origin.x) * smoothing,
-                    y: current.rect.origin.y + (target.rect.origin.y - current.rect.origin.y) * smoothing,
-                    width: current.rect.width + (target.rect.width - current.rect.width) * smoothing,
-                    height: current.rect.height + (target.rect.height - current.rect.height) * smoothing
-                )
-                
-                let newAlpha = current.alpha < 1 ? min(1, current.alpha + fadeSpeed * 3) : current.alpha
-                
-                displayRects[id] = (rect: newRect, name: target.name, alpha: newAlpha)
-                needsUpdate = true
-            } else {
-                if let current = displayRects[id] {
-                    let newAlpha = current.alpha - fadeSpeed
-                    if newAlpha <= 0 {
-                        displayRects.removeValue(forKey: id)
-                    } else {
-                        displayRects[id] = (rect: current.rect, name: current.name, alpha: newAlpha)
-                    }
-                    needsUpdate = true
+        // Fade out faces that are gone
+        let idsToRemove = displayRects.keys.filter { id in
+            targetRects[id] == nil
+        }
+        for id in idsToRemove {
+            if let current = displayRects[id] {
+                let newAlpha = current.alpha - fadeSpeed
+                if newAlpha <= 0 {
+                    displayRects.removeValue(forKey: id)
+                } else {
+                    displayRects[id] = (rect: current.rect, name: current.name, alpha: newAlpha)
                 }
+                needsUpdate = true
             }
         }
         
-        for id in targetRects.keys {
-            if displayRects[id] == nil {
-                displayRects[id] = (rect: targetRects[id]!.rect, name: targetRects[id]!.name, alpha: 0)
-                needsUpdate = true
+        // Update positions and fade in new faces
+        for (id, target) in targetRects {
+            if let current = displayRects[id] {
+                // Update position instantly, fade in if needed
+                let newAlpha = current.alpha < 1 ? min(1, current.alpha + fadeSpeed) : current.alpha
+                displayRects[id] = (rect: target.rect, name: target.name, alpha: newAlpha)
+            } else {
+                // New face - start with fade in
+                displayRects[id] = (rect: target.rect, name: target.name, alpha: 0)
             }
+            needsUpdate = true
         }
         
         if needsUpdate {
@@ -905,14 +897,10 @@ class CameraPreviewUIView: UIView {
         }
     }
     
+    private var targetRects: [Int: (rect: CGRect, name: String)] = [:]
+    
     func updateFaces(_ faces: [FaceTarget], bounds: CGRect) {
         targetRects = Dictionary(uniqueKeysWithValues: faces.map { ($0.id, ($0.rect, $0.recognizedName ?? "")) })
-        
-        for id in displayRects.keys {
-            if targetRects[id] == nil {
-                // Already handled in animation loop
-            }
-        }
     }
     
     private func updateLayers() {
