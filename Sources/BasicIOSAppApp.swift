@@ -1229,6 +1229,8 @@ struct SettingsView: View {
     @State private var showTestImagePicker = false
     @State private var testResult = ""
     @State private var isTesting = false
+    @State private var isAnalyzingScreen = false
+    @State private var screenAnalysisResult = ""
     
     var body: some View {
         VStack(spacing: 0) {
@@ -1353,6 +1355,38 @@ struct SettingsView: View {
                     .padding()
                     .background(Color.white.opacity(0.05))
                     .cornerRadius(10)
+                    
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("SCREEN ANALYSIS")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color(red: 0.0, green: 0.8, blue: 1.0))
+                        
+                        Button(action: analyzeScreen) {
+                            HStack {
+                                Image(systemName: "rectangle.on.rectangle")
+                                Text(isAnalyzingScreen ? "Analyzing..." : "What's on my screen?")
+                            }
+                            .padding()
+                            .background(isAnalyzingScreen ? Color.gray : Color(red: 0.0, green: 0.8, blue: 1.0))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                        }
+                        .disabled(isAnalyzingScreen)
+                        
+                        if screenAnalysisResult != "" {
+                            Text(screenAnalysisResult)
+                                .font(.system(size: 12))
+                                .foregroundColor(.green)
+                                .padding(.top, 5)
+                        }
+                        
+                        Text("Requires JARVISScreenTweak installed")
+                            .font(.system(size: 10))
+                            .foregroundColor(.gray)
+                    }
+                    .padding()
+                    .background(Color.white.opacity(0.05))
+                    .cornerRadius(10)
                 }
                 .padding()
             }
@@ -1370,6 +1404,16 @@ struct SettingsView: View {
         UserDefaults.standard.set(apiKey, forKey: "openrouter_api_key")
         UserDefaults.standard.set(jarvisEnabled, forKey: "jarvis_enabled")
         showSavedAlert = true
+    }
+    
+    func analyzeScreen() {
+        isAnalyzingScreen = true
+        screenAnalysisResult = ""
+        
+        OpenRouterClient().analyzeScreen { result in
+            isAnalyzingScreen = false
+            screenAnalysisResult = result
+        }
     }
 }
 
@@ -1685,6 +1729,72 @@ class OpenRouterClient {
                   let message = choices.first?["message"] as? [String: Any],
                   let responseText = message["content"] as? String else {
                 DispatchQueue.main.async { completion("API error") }
+                return
+            }
+            
+            DispatchQueue.main.async {
+                completion(responseText.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }.resume()
+    }
+    
+    func analyzeScreen(completion: @escaping (String) -> Void) {
+        guard isEnabled else {
+            completion("API key not set")
+            return
+        }
+        
+        let screenshotsDir = "/var/mobile/Library/JARVIS/screenshots"
+        let contextPath = "/var/mobile/Library/JARVIS/context/current.txt"
+        
+        guard let screenshots = try? FileManager.default.contentsOfDirectory(atPath: screenshotsDir) as [String],
+              let latestFile = screenshots.sorted().last else {
+            completion("No screen captures found")
+            return
+        }
+        
+        let fullPath = (screenshotsDir as NSString).appendingPathComponent(latestFile)
+        guard let imageData = try? Data(contentsOf: URL(fileURLWithPath: fullPath)) else {
+            completion("Could not read screenshot")
+            return
+        }
+        
+        var contextInfo = ""
+        if let contextData = try? Data(contentsOf: URL(fileURLWithPath: contextPath)),
+           let context = try? JSONSerialization.jsonObject(with: contextData) as? [String: Any] {
+            if let app = context["app"] as? String {
+                contextInfo = "The user is currently using the app: \(app)"
+            }
+        }
+        
+        let requestBody: [String: Any] = [
+            "model": "anthropic/claude-3-haiku-20240307",
+            "messages": [
+                ["role": "system", "content": "You are JARVIS, Tony Stark's AI assistant. Analyze the user's screen and provide helpful commentary about what you see. Be witty, British, and concise."],
+                ["role": "user", "content": "type: text, text: \(contextInfo) What do you see on the screen? Provide a brief analysis."]
+            ],
+            "max_tokens": 150
+        ]
+        
+        guard let url = URL(string: "https://openrouter.ai/api/v1/chat/completions") else {
+            completion("Invalid URL")
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody)
+        request.timeoutInterval = 30
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let responseText = message["content"] as? String else {
+                DispatchQueue.main.async { completion("Could not analyze screen") }
                 return
             }
             
