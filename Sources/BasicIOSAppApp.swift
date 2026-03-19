@@ -68,8 +68,7 @@ class CameraManager: NSObject, ObservableObject {
     var onFacesDetected: (([FaceTarget]) -> Void)?
     
     private var sequenceHandler: VNSequenceRequestHandler?
-    private var trackedFace: VNFaceObservation?
-    private var trackedName: String?
+    private var trackedFaces: [(observation: VNFaceObservation, name: String?)] = []
     private var frameCount = 0
     private let detectEveryNFrames = 8
     
@@ -114,7 +113,7 @@ class CameraManager: NSObject, ObservableObject {
         captureSession.commitConfiguration()
         isFrontCamera = (position == .front)
         isReady = true
-        trackedFace = nil
+        trackedFaces = []
         
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             if self?.captureSession.isRunning == false {
@@ -168,22 +167,23 @@ class CameraManager: NSObject, ObservableObject {
         
         var faceTargets: [FaceTarget] = []
         
-        if frameCount % detectEveryNFrames == 0 || trackedFace == nil {
+        if frameCount % detectEveryNFrames == 0 || trackedFaces.isEmpty {
             let detectRequest = VNDetectFaceRectanglesRequest()
             let landmarksRequest = VNDetectFaceLandmarksRequest()
             try? handler.perform([detectRequest, landmarksRequest], on: pixelBuffer)
             
             if let rectangles = detectRequest.results, !rectangles.isEmpty {
-                trackedFace = rectangles.first
-                trackedName = faceClassifier?.recognize(observation: rectangles.first!, pixelBuffer: pixelBuffer)
+                trackedFaces = rectangles.map { rect in
+                    let name = faceClassifier?.recognize(observation: rect, pixelBuffer: pixelBuffer)
+                    return (rect, name)
+                }
             } else {
-                trackedFace = nil
-                trackedName = nil
+                trackedFaces = []
             }
         }
         
-        if let face = trackedFace {
-            faceTargets = [FaceTarget(rect: face.boundingBox, confidence: face.confidence, recognizedName: trackedName)]
+        faceTargets = trackedFaces.map { tracked in
+            FaceTarget(rect: tracked.observation.boundingBox, confidence: tracked.observation.confidence, recognizedName: tracked.name)
         }
         
         DispatchQueue.main.async { [weak self] in
@@ -797,11 +797,10 @@ class CameraPreviewUIView: UIView {
     private var cornerLayers: [CAShapeLayer] = []
     private var nameLabels: [CATextLayer] = []
     
-    private var targetRect: CGRect = .zero
-    private var displayRect: CGRect = .zero
-    private var targetName: String?
-    private var displayName: String?
+    private var targetRects: [(rect: CGRect, name: String?)] = []
+    private var displayRects: [(rect: CGRect, name: String, alpha: CGFloat)] = []
     private let smoothing: CGFloat = 0.3
+    private let fadeSpeed: CGFloat = 0.15
     
     private var displayLink: CADisplayLink?
     
@@ -822,30 +821,47 @@ class CameraPreviewUIView: UIView {
     }
     
     @objc private func updateAnimation() {
-        guard targetRect != .zero || displayRect != .zero else { return }
+        var needsUpdate = false
         
-        displayRect = CGRect(
-            x: displayRect.origin.x + (targetRect.origin.x - displayRect.origin.x) * smoothing,
-            y: displayRect.origin.y + (targetRect.origin.y - displayRect.origin.y) * smoothing,
-            width: displayRect.width + (targetRect.width - displayRect.width) * smoothing,
-            height: displayRect.height + (targetRect.height - displayRect.height) * smoothing
-        )
-        
-        if displayName != targetName {
-            displayName = targetName
+        if targetRects.isEmpty {
+            for i in 0..<displayRects.count {
+                if displayRects[i].alpha > 0 {
+                    displayRects[i].alpha = max(0, displayRects[i].alpha - fadeSpeed)
+                    needsUpdate = true
+                }
+            }
+            displayRects.removeAll { $0.alpha <= 0 }
+        } else {
+            while displayRects.count < targetRects.count {
+                displayRects.append((rect: .zero, name: "", alpha: 0))
+            }
+            while displayRects.count > targetRects.count {
+                displayRects.removeLast()
+            }
+            
+            for i in 0..<min(targetRects.count, displayRects.count) {
+                let target = targetRects[i]
+                let current = displayRects[i].rect
+                
+                displayRects[i].rect = CGRect(
+                    x: current.origin.x + (target.rect.origin.x - current.origin.x) * smoothing,
+                    y: current.origin.y + (target.rect.origin.y - current.origin.y) * smoothing,
+                    width: current.width + (target.rect.width - current.width) * smoothing,
+                    height: current.height + (target.rect.height - current.height) * smoothing
+                )
+                displayRects[i].name = target.name ?? ""
+                displayRects[i].alpha = min(1, displayRects[i].alpha + fadeSpeed * 2)
+                needsUpdate = true
+            }
         }
         
-        updateLayers()
+        if needsUpdate {
+            updateLayers()
+        }
     }
     
     func updateFaces(_ faces: [FaceTarget], bounds: CGRect) {
-        if let face = faces.first {
-            targetRect = face.rect
-            targetName = face.recognizedName
-        } else {
-            targetRect = .zero
-            targetName = nil
-        }
+        targetRects = faces.map { ($0.rect, $0.recognizedName) }
     }
     
     private func updateLayers() {
@@ -856,95 +872,98 @@ class CameraPreviewUIView: UIView {
         cornerLayers.removeAll()
         nameLabels.removeAll()
         
-        guard displayRect != .zero else { return }
-        
         let bounds = self.bounds
-        let centerX = displayRect.midX * bounds.width
-        let centerY = (1 - displayRect.midY) * bounds.height
-        let size = max(displayRect.width, displayRect.height) * bounds.width
         
-        let outerRadius = size / 2 + 8
-        let innerRadius = size / 2 - 3
-        
-        let outerCircle = CAShapeLayer()
-        outerCircle.path = UIBezierPath(arcCenter: CGPoint(x: centerX, y: centerY),
-                                        radius: outerRadius,
-                                        startAngle: 0,
-                                        endAngle: .pi * 2,
-                                        clockwise: true).cgPath
-        outerCircle.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 1).cgColor
-        outerCircle.fillColor = UIColor.clear.cgColor
-        outerCircle.lineWidth = 1
-        outerCircle.lineDashPattern = [4, 4]
-        layer.addSublayer(outerCircle)
-        faceLayers.append(outerCircle)
-        
-        let innerCircle = CAShapeLayer()
-        innerCircle.path = UIBezierPath(arcCenter: CGPoint(x: centerX, y: centerY),
-                                        radius: innerRadius,
-                                        startAngle: 0,
-                                        endAngle: .pi * 2,
-                                        clockwise: true).cgPath
-        innerCircle.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 1).cgColor
-        innerCircle.fillColor = UIColor.clear.cgColor
-        innerCircle.lineWidth = 2
-        layer.addSublayer(innerCircle)
-        faceLayers.append(innerCircle)
-        
-        let cornerSize: CGFloat = 12
-        let corners: [(CGPoint, CGFloat)] = [
-            (CGPoint(x: centerX - innerRadius, y: centerY - innerRadius), 0),
-            (CGPoint(x: centerX + innerRadius, y: centerY - innerRadius), .pi / 2),
-            (CGPoint(x: centerX + innerRadius, y: centerY + innerRadius), .pi),
-            (CGPoint(x: centerX - innerRadius, y: centerY + innerRadius), .pi * 1.5)
-        ]
-        
-        for (corner, startAngle) in corners {
-            let cornerLayer = CAShapeLayer()
-            let path = UIBezierPath()
-            path.move(to: CGPoint(x: corner.x + cos(startAngle) * cornerSize,
-                                  y: corner.y + sin(startAngle) * cornerSize))
-            path.addLine(to: corner)
-            path.addLine(to: CGPoint(x: corner.x + cos(startAngle + .pi / 2) * cornerSize,
-                                     y: corner.y + sin(startAngle + .pi / 2) * cornerSize))
-            cornerLayer.path = path.cgPath
-            cornerLayer.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 1).cgColor
-            cornerLayer.fillColor = UIColor.clear.cgColor
-            cornerLayer.lineWidth = 2
-            layer.addSublayer(cornerLayer)
-            cornerLayers.append(cornerLayer)
-        }
-        
-        let lineLength: CGFloat = 25
-        let crosshairOffsets: [(CGFloat, CGFloat)] = [
-            (0 as CGFloat, -innerRadius - lineLength),
-            (0 as CGFloat, innerRadius + lineLength),
-            (-innerRadius - lineLength, 0 as CGFloat),
-            (innerRadius + lineLength, 0 as CGFloat)
-        ]
-        
-        for (dx, dy) in crosshairOffsets {
-            let lineLayer = CAShapeLayer()
-            let path = UIBezierPath()
-            path.move(to: CGPoint(x: centerX, y: centerY))
-            path.addLine(to: CGPoint(x: centerX + dx, y: centerY + dy))
-            lineLayer.path = path.cgPath
-            lineLayer.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: 0.8).cgColor
-            lineLayer.lineWidth = 1
-            layer.addSublayer(lineLayer)
-            cornerLayers.append(lineLayer)
-        }
-        
-        if let name = displayName {
-            let nameLayer = CATextLayer()
-            nameLayer.string = name
-            nameLayer.fontSize = 14
-            nameLayer.foregroundColor = UIColor(red: 1, green: 0.3, blue: 0, alpha: 1).cgColor
-            nameLayer.backgroundColor = UIColor.black.withAlphaComponent(0.5).cgColor
-            nameLayer.frame = CGRect(x: centerX - 50, y: centerY + innerRadius + 5, width: 100, height: 20)
-            nameLayer.alignmentMode = .center
-            layer.addSublayer(nameLayer)
-            nameLabels.append(nameLayer)
+        for display in displayRects {
+            guard display.alpha > 0 else { continue }
+            
+            let centerX = display.rect.midX * bounds.width
+            let centerY = (1 - display.rect.midY) * bounds.height
+            let size = max(display.rect.width, display.rect.height) * bounds.width
+            
+            let outerRadius = size / 2 + 8
+            let innerRadius = size / 2 - 3
+            
+            let outerCircle = CAShapeLayer()
+            outerCircle.path = UIBezierPath(arcCenter: CGPoint(x: centerX, y: centerY),
+                                            radius: outerRadius,
+                                            startAngle: 0,
+                                            endAngle: .pi * 2,
+                                            clockwise: true).cgPath
+            outerCircle.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: display.alpha).cgColor
+            outerCircle.fillColor = UIColor.clear.cgColor
+            outerCircle.lineWidth = 1
+            outerCircle.lineDashPattern = [4, 4]
+            layer.addSublayer(outerCircle)
+            faceLayers.append(outerCircle)
+            
+            let innerCircle = CAShapeLayer()
+            innerCircle.path = UIBezierPath(arcCenter: CGPoint(x: centerX, y: centerY),
+                                            radius: innerRadius,
+                                            startAngle: 0,
+                                            endAngle: .pi * 2,
+                                            clockwise: true).cgPath
+            innerCircle.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: display.alpha).cgColor
+            innerCircle.fillColor = UIColor.clear.cgColor
+            innerCircle.lineWidth = 2
+            layer.addSublayer(innerCircle)
+            faceLayers.append(innerCircle)
+            
+            let cornerSize: CGFloat = 12
+            let corners: [(CGPoint, CGFloat)] = [
+                (CGPoint(x: centerX - innerRadius, y: centerY - innerRadius), 0),
+                (CGPoint(x: centerX + innerRadius, y: centerY - innerRadius), .pi / 2),
+                (CGPoint(x: centerX + innerRadius, y: centerY + innerRadius), .pi),
+                (CGPoint(x: centerX - innerRadius, y: centerY + innerRadius), .pi * 1.5)
+            ]
+            
+            for (corner, startAngle) in corners {
+                let cornerLayer = CAShapeLayer()
+                let path = UIBezierPath()
+                path.move(to: CGPoint(x: corner.x + cos(startAngle) * cornerSize,
+                                      y: corner.y + sin(startAngle) * cornerSize))
+                path.addLine(to: corner)
+                path.addLine(to: CGPoint(x: corner.x + cos(startAngle + .pi / 2) * cornerSize,
+                                         y: corner.y + sin(startAngle + .pi / 2) * cornerSize))
+                cornerLayer.path = path.cgPath
+                cornerLayer.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: display.alpha).cgColor
+                cornerLayer.fillColor = UIColor.clear.cgColor
+                cornerLayer.lineWidth = 2
+                layer.addSublayer(cornerLayer)
+                cornerLayers.append(cornerLayer)
+            }
+            
+            let lineLength: CGFloat = 25
+            let crosshairOffsets: [(CGFloat, CGFloat)] = [
+                (0 as CGFloat, -innerRadius - lineLength),
+                (0 as CGFloat, innerRadius + lineLength),
+                (-innerRadius - lineLength, 0 as CGFloat),
+                (innerRadius + lineLength, 0 as CGFloat)
+            ]
+            
+            for (dx, dy) in crosshairOffsets {
+                let lineLayer = CAShapeLayer()
+                let path = UIBezierPath()
+                path.move(to: CGPoint(x: centerX, y: centerY))
+                path.addLine(to: CGPoint(x: centerX + dx, y: centerY + dy))
+                lineLayer.path = path.cgPath
+                lineLayer.strokeColor = UIColor(red: 0, green: 0.8, blue: 1, alpha: display.alpha * 0.8).cgColor
+                lineLayer.lineWidth = 1
+                layer.addSublayer(lineLayer)
+                cornerLayers.append(lineLayer)
+            }
+            
+            if !display.name.isEmpty {
+                let nameLayer = CATextLayer()
+                nameLayer.string = display.name
+                nameLayer.fontSize = 14
+                nameLayer.foregroundColor = UIColor(red: 1, green: 0.3, blue: 0, alpha: display.alpha).cgColor
+                nameLayer.backgroundColor = UIColor.black.withAlphaComponent(0.5 * display.alpha).cgColor
+                nameLayer.frame = CGRect(x: centerX - 50, y: centerY + innerRadius + 5, width: 100, height: 20)
+                nameLayer.alignmentMode = .center
+                layer.addSublayer(nameLayer)
+                nameLabels.append(nameLayer)
+            }
         }
     }
 }
