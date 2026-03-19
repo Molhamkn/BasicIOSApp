@@ -71,7 +71,7 @@ class CameraManager: NSObject, ObservableObject {
     private var trackedFaces: [(id: Int, observation: VNFaceObservation, name: String?)] = []
     private var nextFaceId = 0
     private var frameCount = 0
-    private let detectEveryNFrames = 8
+    private let detectEveryNFrames = 2
     
     var faceClassifier: FaceClassifier?
     
@@ -839,10 +839,10 @@ class CameraPreviewUIView: UIView {
     private var cornerLayers: [CAShapeLayer] = []
     private var nameLabels: [CATextLayer] = []
     
-    private var displayFaces: [Int: (rect: CGRect, name: String, alpha: CGFloat)] = [:]
-    private var sortedFaceIds: [Int] = []
-    private let smoothing: CGFloat = 0.3
-    private let fadeSpeed: CGFloat = 0.15
+    private var targetRects: [Int: (rect: CGRect, name: String)] = [:]
+    private var displayRects: [Int: (rect: CGRect, name: String, alpha: CGFloat)] = [:]
+    private let smoothing: CGFloat = 0.15
+    private let fadeSpeed: CGFloat = 0.08
     
     private var displayLink: CADisplayLink?
     
@@ -858,60 +858,61 @@ class CameraPreviewUIView: UIView {
     
     private func startAnimation() {
         displayLink = CADisplayLink(target: self, selector: #selector(updateAnimation))
-        displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60)
+        displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120)
         displayLink?.add(to: .main, forMode: .common)
     }
     
     @objc private func updateAnimation() {
         var needsUpdate = false
         
-        let currentIds = Set(displayFaces.keys)
-        var targetIds = Set<Int>()
-        
-        for (id, display) in displayFaces {
-            if display.alpha > 0 {
+        for id in displayRects.keys {
+            if let target = targetRects[id] {
+                let current = displayRects[id]!
+                
                 let newRect = CGRect(
-                    x: display.rect.origin.x * (1 - smoothing) + (displayFaces[id]?.rect.origin.x ?? display.rect.origin.x) * smoothing,
-                    y: display.rect.origin.y * (1 - smoothing) + (displayFaces[id]?.rect.origin.y ?? display.rect.origin.y) * smoothing,
-                    width: display.rect.width * (1 - smoothing) + (displayFaces[id]?.rect.width ?? display.rect.width) * smoothing,
-                    height: display.rect.height * (1 - smoothing) + (displayFaces[id]?.rect.height ?? display.rect.height) * smoothing
+                    x: current.rect.origin.x + (target.rect.origin.x - current.rect.origin.x) * smoothing,
+                    y: current.rect.origin.y + (target.rect.origin.y - current.rect.origin.y) * smoothing,
+                    width: current.rect.width + (target.rect.width - current.rect.width) * smoothing,
+                    height: current.rect.height + (target.rect.height - current.rect.height) * smoothing
                 )
-                displayFaces[id] = (rect: newRect, name: display.name, alpha: display.alpha - fadeSpeed)
-                if displayFaces[id]!.alpha <= 0 {
-                    displayFaces.removeValue(forKey: id)
-                    needsUpdate = true
-                } else {
+                
+                let newAlpha = current.alpha < 1 ? min(1, current.alpha + fadeSpeed * 3) : current.alpha
+                
+                displayRects[id] = (rect: newRect, name: target.name, alpha: newAlpha)
+                needsUpdate = true
+            } else {
+                if let current = displayRects[id] {
+                    let newAlpha = current.alpha - fadeSpeed
+                    if newAlpha <= 0 {
+                        displayRects.removeValue(forKey: id)
+                    } else {
+                        displayRects[id] = (rect: current.rect, name: current.name, alpha: newAlpha)
+                    }
                     needsUpdate = true
                 }
             }
         }
         
-        if needsUpdate || !displayFaces.isEmpty {
+        for id in targetRects.keys {
+            if displayRects[id] == nil {
+                displayRects[id] = (rect: targetRects[id]!.rect, name: targetRects[id]!.name, alpha: 0)
+                needsUpdate = true
+            }
+        }
+        
+        if needsUpdate {
             updateLayers()
         }
     }
     
     func updateFaces(_ faces: [FaceTarget], bounds: CGRect) {
-        for face in faces {
-            if let existing = displayFaces[face.id] {
-                displayFaces[face.id] = (rect: face.rect, name: face.recognizedName ?? "", alpha: 1)
-            } else {
-                displayFaces[face.id] = (rect: face.rect, name: face.recognizedName ?? "", alpha: 0)
+        targetRects = Dictionary(uniqueKeysWithValues: faces.map { ($0.id, ($0.rect, $0.recognizedName ?? "")) })
+        
+        for id in displayRects.keys {
+            if targetRects[id] == nil {
+                // Already handled in animation loop
             }
         }
-        
-        let currentIds = Set(displayFaces.keys)
-        let newIds = Set(faces.map { $0.id })
-        let toRemove = currentIds.subtracting(newIds)
-        for id in toRemove {
-            if let existing = displayFaces[id], existing.alpha > 0 {
-                displayFaces[id] = (rect: existing.rect, name: existing.name, alpha: max(0, existing.alpha - fadeSpeed * 2))
-            } else {
-                displayFaces.removeValue(forKey: id)
-            }
-        }
-        
-        sortedFaceIds = faces.map { $0.id }
     }
     
     private func updateLayers() {
@@ -924,7 +925,7 @@ class CameraPreviewUIView: UIView {
         
         let bounds = self.bounds
         
-        for (_, display) in displayFaces {
+        for (_, display) in displayRects {
             guard display.alpha > 0 else { continue }
             
             let centerX = display.rect.midX * bounds.width
