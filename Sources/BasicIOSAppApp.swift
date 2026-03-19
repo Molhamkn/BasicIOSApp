@@ -5,7 +5,7 @@ import PhotosUI
 import CoreImage
 import SQLite
 
-struct CameraContainerView: View {
+struct CameraContainerView: SwiftUI.View {
     @StateObject private var cameraManager = CameraManager()
     @State private var showCameraSwitcher = false
     @State private var baseZoom: CGFloat = 1.0
@@ -446,7 +446,7 @@ class FaceClassifier {
     }
 }
 
-struct TrainingModeView: View {
+struct TrainingModeView: SwiftUI.View {
     @ObservedObject var cameraManager: CameraManager
     @Binding var showTrainingMode: Bool
     @State private var newPersonName = ""
@@ -873,12 +873,12 @@ class CameraPreviewUIView: UIView {
     }
 }
 
-struct IronManHUD: View {
+struct IronManHUD: SwiftUI.View {
     let currentZoom: CGFloat
     @Binding var showCameraSwitcher: Bool
     let cameraManager: CameraManager
     var faceCount: Int = 0
-    var showTrainingMode: Binding<Bool>? = nil
+    var showTrainingMode: SwiftUI.SwiftUI.Binding<Bool>? = nil
     
     var body: some View {
         VStack {
@@ -922,7 +922,7 @@ struct IronManHUD: View {
     }
 }
 
-struct TargetCounter: View {
+struct TargetCounter: SwiftUI.View {
     let count: Int
     @State private var pulse = false
     
@@ -944,7 +944,7 @@ struct TargetCounter: View {
     }
 }
 
-struct TimeDisplay: View {
+struct TimeDisplay: SwiftUI.View {
     @State private var currentTime = Date()
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     
@@ -965,7 +965,7 @@ struct TimeDisplay: View {
     }
 }
 
-struct ZoomIndicator: View {
+struct ZoomIndicator: SwiftUI.View {
     let zoom: CGFloat
     
     var body: some View {
@@ -976,9 +976,9 @@ struct ZoomIndicator: View {
     }
 }
 
-struct CameraSwitchButton: View {
+struct CameraSwitchButton: SwiftUI.View {
     let cameraManager: CameraManager
-    let showCameraSwitcher: Binding<Bool>
+    let showCameraSwitcher: SwiftUI.SwiftUI.Binding<Bool>
     
     var body: some View {
         Button(action: {
